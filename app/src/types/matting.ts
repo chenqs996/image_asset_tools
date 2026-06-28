@@ -9,6 +9,8 @@ export interface MattingConfig {
   feather: number
   edgePreference: EdgePreference
   removeOuterBorder: boolean
+  trimBorderX: number
+  trimBorderY: number
   bgColorHex: string
   modelPath: string
 }
@@ -28,6 +30,8 @@ export const DEFAULT_MATTING_CONFIG: MattingConfig = {
   feather: 1,
   edgePreference: 'keep_detail',
   removeOuterBorder: true,
+  trimBorderX: 0,
+  trimBorderY: 0,
   bgColorHex: '#ffffff',
   modelPath: '/models/u2net.onnx',
 }

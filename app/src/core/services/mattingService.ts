@@ -53,6 +53,18 @@ interface BorderTrim {
   left: number
 }
 
+function mergeBorderTrim(autoTrim: BorderTrim | null, manualX: number, manualY: number, width: number, height: number): BorderTrim | null {
+  const safeX = clamp(Math.floor(manualX), 0, Math.floor(width / 2))
+  const safeY = clamp(Math.floor(manualY), 0, Math.floor(height / 2))
+  const merged: BorderTrim = {
+    top: Math.max(autoTrim?.top ?? 0, safeY),
+    right: Math.max(autoTrim?.right ?? 0, safeX),
+    bottom: Math.max(autoTrim?.bottom ?? 0, safeY),
+    left: Math.max(autoTrim?.left ?? 0, safeX),
+  }
+  return merged.top || merged.right || merged.bottom || merged.left ? merged : null
+}
+
 function colorDistance(r1: number, g1: number, b1: number, r2: number, g2: number, b2: number) {
   const dr = r1 - r2
   const dg = g1 - g2
@@ -77,6 +89,15 @@ function averageRowColor(data: Uint8ClampedArray, width: number, row: number) {
   }
 }
 
+function averageRowAlpha(data: Uint8ClampedArray, width: number, row: number) {
+  let alpha = 0
+  for (let x = 0; x < width; x += 1) {
+    const idx = (row * width + x) * 4
+    alpha += data[idx + 3]
+  }
+  return alpha / width
+}
+
 function averageColColor(data: Uint8ClampedArray, width: number, height: number, col: number) {
   let r = 0
   let g = 0
@@ -94,6 +115,33 @@ function averageColColor(data: Uint8ClampedArray, width: number, height: number,
   }
 }
 
+function averageColAlpha(data: Uint8ClampedArray, width: number, height: number, col: number) {
+  let alpha = 0
+  for (let y = 0; y < height; y += 1) {
+    const idx = (y * width + col) * 4
+    alpha += data[idx + 3]
+  }
+  return alpha / height
+}
+
+function rowTransparentRatio(data: Uint8ClampedArray, width: number, row: number, alphaThreshold: number) {
+  let transparent = 0
+  for (let x = 0; x < width; x += 1) {
+    const idx = (row * width + x) * 4
+    if (data[idx + 3] <= alphaThreshold) transparent += 1
+  }
+  return transparent / width
+}
+
+function colTransparentRatio(data: Uint8ClampedArray, width: number, height: number, col: number, alphaThreshold: number) {
+  let transparent = 0
+  for (let y = 0; y < height; y += 1) {
+    const idx = (y * width + col) * 4
+    if (data[idx + 3] <= alphaThreshold) transparent += 1
+  }
+  return transparent / height
+}
+
 function isBorderRowLike(data: Uint8ClampedArray, width: number, row: number, ref: { r: number; g: number; b: number }) {
   let similar = 0
   const tolerance = 20
@@ -102,7 +150,10 @@ function isBorderRowLike(data: Uint8ClampedArray, width: number, row: number, re
     const dist = colorDistance(data[idx], data[idx + 1], data[idx + 2], ref.r, ref.g, ref.b)
     if (dist <= tolerance) similar += 1
   }
-  return similar / width >= 0.9
+  const similarRatio = similar / width
+  const avgAlpha = averageRowAlpha(data, width, row)
+  const transparentRatio = rowTransparentRatio(data, width, row, 36)
+  return transparentRatio >= 0.92 || (similarRatio >= 0.9 && avgAlpha <= 84)
 }
 
 function isBorderColLike(data: Uint8ClampedArray, width: number, height: number, col: number, ref: { r: number; g: number; b: number }) {
@@ -113,7 +164,10 @@ function isBorderColLike(data: Uint8ClampedArray, width: number, height: number,
     const dist = colorDistance(data[idx], data[idx + 1], data[idx + 2], ref.r, ref.g, ref.b)
     if (dist <= tolerance) similar += 1
   }
-  return similar / height >= 0.9
+  const similarRatio = similar / height
+  const avgAlpha = averageColAlpha(data, width, height, col)
+  const transparentRatio = colTransparentRatio(data, width, height, col, 36)
+  return transparentRatio >= 0.92 || (similarRatio >= 0.9 && avgAlpha <= 84)
 }
 
 function detectOuterBorderTrim(data: Uint8ClampedArray, width: number, height: number): BorderTrim {
@@ -236,7 +290,6 @@ export async function runMatting(asset: ImageAsset, config: MattingConfig): Prom
   ctx.drawImage(image, 0, 0)
   const frame = ctx.getImageData(0, 0, canvas.width, canvas.height)
   const pixels = frame.data
-  const borderTrim = config.removeOuterBorder ? detectOuterBorderTrim(pixels, canvas.width, canvas.height) : null
 
   let alpha = new Uint8ClampedArray(frame.data.length / 4)
   let warning: string | undefined
@@ -258,17 +311,25 @@ export async function runMatting(asset: ImageAsset, config: MattingConfig): Prom
 
   for (let i = 0; i < pixels.length; i += 4) {
     const idx = i / 4
-    const x = idx % canvas.width
-    const y = Math.floor(idx / canvas.width)
-    const forceTrim = borderTrim ? inTrimBorder(x, y, canvas.width, canvas.height, borderTrim) : false
-    const a = forceTrim ? 0 : clamp(smoothed[idx] + edgeBoost, 0, 255)
-    pixels[i + 3] = a
+    pixels[i + 3] = clamp(smoothed[idx] + edgeBoost, 0, 255)
   }
+
+  const autoBorderTrim = config.removeOuterBorder ? detectOuterBorderTrim(pixels, canvas.width, canvas.height) : null
+  const borderTrim = mergeBorderTrim(autoBorderTrim, config.trimBorderX, config.trimBorderY, canvas.width, canvas.height)
 
   if (borderTrim) {
     const removed = borderTrim.top + borderTrim.right + borderTrim.bottom + borderTrim.left
     if (removed > 0) {
-      const trimHint = `外边框处理：上${borderTrim.top} 右${borderTrim.right} 下${borderTrim.bottom} 左${borderTrim.left}`
+      for (let i = 0; i < pixels.length; i += 4) {
+        const idx = i / 4
+        const x = idx % canvas.width
+        const y = Math.floor(idx / canvas.width)
+        if (inTrimBorder(x, y, canvas.width, canvas.height, borderTrim)) {
+          pixels[i + 3] = 0
+        }
+      }
+
+      const trimHint = `边框处理：上${borderTrim.top} 右${borderTrim.right} 下${borderTrim.bottom} 左${borderTrim.left}`
       warning = warning ? `${warning}；${trimHint}` : trimHint
     }
   }

@@ -1,10 +1,8 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent, type KeyboardEvent } from 'react'
 import { importImageFiles } from '../../core/services/imageImportService'
-import { configService, type AppConfig } from '../../core/services/configService'
 import { runMatting } from '../../core/services/mattingService'
 import { providerRegistry } from '../../core/services/providerRegistry'
 import { useWorkspace } from '../../core/state/useWorkspace'
-import { platformBridge } from '../../platform/platformBridge'
 import { DEFAULT_MATTING_CONFIG, type MattingConfig, type MattingResult } from '../../types/matting'
 import { DEFAULT_SLICE_CONFIG } from '../../types/slice'
 import type { ImageAsset } from '../../types/image'
@@ -28,9 +26,42 @@ interface SlicePreviewItem {
 
 const TAB_ORDER: ProcessTab[] = ['slice', 'scale', 'matting', 'timeline']
 
+function createEmptyTabAssets(): Record<ProcessTab, ImageAsset[]> {
+  return {
+    slice: [],
+    scale: [],
+    matting: [],
+    timeline: [],
+  }
+}
+
+function revokeAssetUrls(assets: ImageAsset[]) {
+  assets.forEach((item) => URL.revokeObjectURL(item.objectUrl))
+}
+
+function fileNameWithoutExt(name: string) {
+  return name.replace(/\.[^.]+$/, '')
+}
+
+async function cloneAssetForImport(asset: ImageAsset, nextName?: string): Promise<ImageAsset> {
+  const response = await fetch(asset.objectUrl)
+  const blob = await response.blob()
+  const ext = asset.format === 'jpeg' ? 'jpg' : asset.format
+  const fileName = nextName ?? asset.name
+  const file = new File([blob], fileName.endsWith(`.${ext}`) ? fileName : `${fileName}.${ext}`, { type: blob.type || `image/${asset.format}` })
+  return {
+    id: `${file.name}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    name: file.name,
+    format: asset.format,
+    width: asset.width,
+    height: asset.height,
+    size: blob.size,
+    objectUrl: URL.createObjectURL(blob),
+    file,
+  }
+}
+
 export function ProcessPage() {
-  const [config, setConfig] = useState<AppConfig | null>(null)
-  const [providers, setProviders] = useState<string[]>([])
   const [lineTool, setLineTool] = useState<'x' | 'y'>('x')
   const [detecting, setDetecting] = useState(false)
   const [draggingLine, setDraggingLine] = useState<{ axis: 'x' | 'y'; line: number } | null>(null)
@@ -55,11 +86,12 @@ export function ProcessPage() {
   const [showImportModal, setShowImportModal] = useState(false)
   const [showExportModal, setShowExportModal] = useState(false)
   const [prefix, setPrefix] = useState('asset')
+  const [prefixTouched, setPrefixTouched] = useState(false)
   const [startIndex, setStartIndex] = useState(1)
   const [digits, setDigits] = useState(3)
   const [suffix, setSuffix] = useState('')
   const [format, setFormat] = useState<ExportFormat>('PNG')
-  const [exportScope, setExportScope] = useState<'all' | 'active' | 'slice_preview'>('all')
+  const [exportScope, setExportScope] = useState<'all' | 'selected'>('all')
   const [exportStatus, setExportStatus] = useState('')
   const [selectedExportPreviewId, setSelectedExportPreviewId] = useState<string | null>(null)
   const [exportPreviewLightbox, setExportPreviewLightbox] = useState<{
@@ -70,8 +102,11 @@ export function ProcessPage() {
   const [selectedSlicePreview, setSelectedSlicePreview] = useState<SlicePreviewItem | null>(null)
   const [selectedAssetPreview, setSelectedAssetPreview] = useState<ImageAsset | null>(null)
   const [previewRenderSize, setPreviewRenderSize] = useState({ width: 0, height: 0 })
+  const [tabAssets, setTabAssets] = useState<Record<ProcessTab, ImageAsset[]>>(createEmptyTabAssets)
+  const [timelineFrameIds, setTimelineFrameIds] = useState<string[]>([])
 
   const previewImageRef = useRef<HTMLImageElement | null>(null)
+  const latestTabAssetsRef = useRef<Record<ProcessTab, ImageAsset[]>>(createEmptyTabAssets())
   const tabRefs = useRef<Record<ProcessTab, HTMLButtonElement | null>>({
     slice: null,
     scale: null,
@@ -80,7 +115,6 @@ export function ProcessPage() {
   })
 
   const {
-    assets,
     sliceConfig,
     setSliceConfig,
     scaleConfig,
@@ -88,50 +122,55 @@ export function ProcessPage() {
     timeline,
     setTimelineFps,
     toggleTimelineLoop,
-    reorderTimelineFrame,
-    removeTimelineFrame,
-    setAssets,
-    clearAssets,
   } = useWorkspace()
 
-  const platform = platformBridge.getPlatformInfo()
-
   useEffect(() => {
-    if (assets.length === 0) {
+    const hasAnyAssets = TAB_ORDER.some((tab) => tabAssets[tab].length > 0)
+    if (!hasAnyAssets) {
       setSelectedAssetsByTab({ slice: null, scale: null, matting: null, timeline: null })
       return
     }
 
     setSelectedAssetsByTab((prev) => {
-      const firstId = assets[0].id
       const next: Record<ProcessTab, string | null> = { ...prev }
       for (const tab of TAB_ORDER) {
+        const tabList = tabAssets[tab]
         const current = prev[tab]
-        next[tab] = current && assets.some((asset) => asset.id === current) ? current : firstId
+        next[tab] = current && tabList.some((asset) => asset.id === current) ? current : (tabList[0]?.id ?? null)
       }
       return next
     })
-  }, [assets])
+  }, [tabAssets])
+
+  useEffect(() => {
+    latestTabAssetsRef.current = tabAssets
+  }, [tabAssets])
+
+  useEffect(() => {
+    return () => {
+      TAB_ORDER.forEach((tab) => revokeAssetUrls(latestTabAssetsRef.current[tab]))
+    }
+  }, [])
 
   const getAssetByTab = (tab: ProcessTab) => {
     const id = selectedAssetsByTab[tab]
-    return assets.find((item) => item.id === id) ?? null
+    return tabAssets[tab].find((item) => item.id === id) ?? null
   }
 
   const sliceAsset = getAssetByTab('slice')
   const scaleAsset = getAssetByTab('scale')
   const mattingAsset = getAssetByTab('matting')
-  const activeAsset = getAssetByTab(activeTab)
+  const activeTabAssets = tabAssets[activeTab]
 
   const assetScrollerItems = useMemo<HorizontalImageScrollerItem[]>(
     () =>
-      assets.map((asset) => ({
+      activeTabAssets.map((asset) => ({
         id: asset.id,
         imageUrl: asset.objectUrl,
         title: asset.name,
         metaLines: [`${asset.width}×${asset.height}`],
       })),
-    [assets],
+    [activeTabAssets],
   )
 
   const sliceRects = useMemo(() => {
@@ -165,14 +204,21 @@ export function ProcessPage() {
   }, [scaleAsset, scaleConfig])
 
   const timelineAssets = useMemo(
-    () => timeline.frameIds.map((id) => assets.find((item) => item.id === id)).filter(Boolean),
-    [timeline.frameIds, assets],
+    () => timelineFrameIds.map((id) => tabAssets.timeline.find((item) => item.id === id)).filter(Boolean),
+    [timelineFrameIds, tabAssets.timeline],
   )
   const currentFrame = timelineAssets.length > 0 ? timelineAssets[frameIndex % timelineAssets.length] : null
 
-  const exportTargets = useMemo(() => {
-    if (exportScope === 'active') return activeAsset ? [activeAsset] : []
-    if (exportScope === 'slice_preview') {
+  useEffect(() => {
+    setTimelineFrameIds((prev) => {
+      const existing = prev.filter((id) => tabAssets.timeline.some((asset) => asset.id === id))
+      const append = tabAssets.timeline.map((asset) => asset.id).filter((id) => !existing.includes(id))
+      return [...existing, ...append]
+    })
+  }, [tabAssets.timeline])
+
+  const processedAssetsForActiveTab = useMemo<ImageAsset[]>(() => {
+    if (activeTab === 'slice') {
       return slicePreviewItems.map((item) => ({
         id: item.id,
         name: `slice_${item.index}.png`,
@@ -182,10 +228,35 @@ export function ProcessPage() {
         size: 0,
         objectUrl: item.objectUrl,
         file: new File([], `slice_${item.index}.png`),
-      })) as ImageAsset[]
+      }))
     }
-    return assets
-  }, [assets, activeAsset, exportScope, slicePreviewItems])
+
+    if (activeTab === 'matting') {
+      return tabAssets.matting
+        .filter((asset) => Boolean(mattingResults[asset.id]))
+        .map((asset) => ({
+          ...asset,
+          name: asset.name.replace(/\.[^.]+$/, '') + '_matted.png',
+          format: 'png' as const,
+          objectUrl: mattingResults[asset.id].outputUrl,
+          size: 0,
+          file: new File([], asset.name.replace(/\.[^.]+$/, '') + '_matted.png'),
+        }))
+    }
+
+    if (activeTab === 'timeline') {
+      return timelineAssets as ImageAsset[]
+    }
+
+    return tabAssets.scale
+  }, [activeTab, mattingResults, slicePreviewItems, tabAssets.matting, tabAssets.scale, timelineAssets])
+
+  const exportTargets = useMemo(() => {
+    if (exportScope === 'selected') {
+      return processedAssetsForActiveTab.filter((item) => item.id === selectedExportPreviewId)
+    }
+    return processedAssetsForActiveTab
+  }, [exportScope, processedAssetsForActiveTab, selectedExportPreviewId])
 
   const slicePreviewScrollerItems = useMemo<HorizontalImageScrollerItem[]>(
     () =>
@@ -200,13 +271,13 @@ export function ProcessPage() {
 
   const exportPreviewItems = useMemo<HorizontalImageScrollerItem[]>(
     () =>
-      exportTargets.map((item) => ({
+      processedAssetsForActiveTab.map((item) => ({
         id: item.id,
         imageUrl: item.objectUrl,
         title: item.name,
         metaLines: [`${item.width}×${item.height}`, `${item.format.toUpperCase()}`],
       })),
-    [exportTargets],
+    [processedAssetsForActiveTab],
   )
 
   const selectedSliceIndex = useMemo(() => {
@@ -215,10 +286,7 @@ export function ProcessPage() {
   }, [selectedSlicePreview, slicePreviewItems])
 
   useEffect(() => {
-    configService.load().then(setConfig)
-    providerRegistry.loadRuntimePlugins().finally(() => {
-      setProviders(providerRegistry.listManifests().map((item) => item.displayName))
-    })
+    providerRegistry.loadRuntimePlugins()
     return () => {
       Object.values(mattingResults).forEach((item) => URL.revokeObjectURL(item.outputUrl))
       slicePreviewItems.forEach((item) => URL.revokeObjectURL(item.objectUrl))
@@ -246,21 +314,24 @@ export function ProcessPage() {
 
   useEffect(() => {
     if (activeTab !== 'slice') {
-      setExportScope((prev) => (prev === 'slice_preview' ? 'all' : prev))
+      setExportScope('all')
     }
   }, [activeTab])
 
   useEffect(() => {
     if (!showExportModal) return
-    if (exportTargets.length === 0) {
+    if (!prefixTouched && activeTabAssets.length > 0) {
+      setPrefix(fileNameWithoutExt(activeTabAssets[0].name) || 'asset')
+    }
+    if (processedAssetsForActiveTab.length === 0) {
       setSelectedExportPreviewId(null)
       return
     }
-    const exists = selectedExportPreviewId && exportTargets.some((item) => item.id === selectedExportPreviewId)
+    const exists = selectedExportPreviewId && processedAssetsForActiveTab.some((item) => item.id === selectedExportPreviewId)
     if (!exists) {
-      setSelectedExportPreviewId(exportTargets[0].id)
+      setSelectedExportPreviewId(processedAssetsForActiveTab[0].id)
     }
-  }, [showExportModal, exportTargets, selectedExportPreviewId])
+  }, [showExportModal, processedAssetsForActiveTab, selectedExportPreviewId, activeTabAssets, prefixTouched])
 
   useEffect(() => {
     const img = previewImageRef.current
@@ -282,6 +353,30 @@ export function ProcessPage() {
 
   const setSelectedAssetForTab = (tab: ProcessTab, assetId: string) => {
     setSelectedAssetsByTab((prev) => ({ ...prev, [tab]: assetId }))
+  }
+
+  const reorderTimelineFrameLocal = (from: number, to: number) => {
+    setTimelineFrameIds((prev) => {
+      const next = [...prev]
+      const [item] = next.splice(from, 1)
+      if (item === undefined) return prev
+      next.splice(to, 0, item)
+      return next
+    })
+  }
+
+  const removeTimelineFrameLocal = (assetId: string) => {
+    setTimelineFrameIds((prev) => prev.filter((id) => id !== assetId))
+  }
+
+  const replaceAssetsForTab = (tab: ProcessTab, nextAssets: ImageAsset[]) => {
+    setTabAssets((prev) => {
+      revokeAssetUrls(prev[tab])
+      return {
+        ...prev,
+        [tab]: nextAssets,
+      }
+    })
   }
 
   const updateNumber = (
@@ -361,6 +456,24 @@ export function ProcessPage() {
     setMattingConfig((prev) => ({ ...prev, [key]: Number.isFinite(parsed) ? parsed : 0 }))
   }
 
+  const updateMattingTrim = (axis: 'x' | 'y', value: string) => {
+    const parsed = Math.max(0, Number(value) || 0)
+    setMattingConfig((prev) => {
+      const untouched = prev.trimBorderX === 0 && prev.trimBorderY === 0
+      if (untouched) {
+        return {
+          ...prev,
+          trimBorderX: parsed,
+          trimBorderY: parsed,
+        }
+      }
+
+      return axis === 'x'
+        ? { ...prev, trimBorderX: parsed }
+        : { ...prev, trimBorderY: parsed }
+    })
+  }
+
   const mergedConfigForAsset = (assetId: string): MattingConfig => ({
     ...mattingConfig,
     ...(mattingOverrides[assetId] ?? {}),
@@ -383,11 +496,11 @@ export function ProcessPage() {
   }
 
   const handleBatchMatting = async () => {
-    if (assets.length === 0) return
+    if (tabAssets.matting.length === 0) return
     setProcessingBatch(true)
     let finished = 0
-    for (const asset of assets) {
-      setMattingStatus(`批量处理中 ${finished + 1}/${assets.length}：${asset.name}`)
+    for (const asset of tabAssets.matting) {
+      setMattingStatus(`批量处理中 ${finished + 1}/${tabAssets.matting.length}：${asset.name}`)
       const result = await runMatting(asset, mergedConfigForAsset(asset.id))
       setMattingResult(result)
       finished += 1
@@ -470,9 +583,58 @@ export function ProcessPage() {
     if (!files || files.length === 0) return
     const nextAssets = await importImageFiles(files)
     if (nextAssets.length === 0) return
-    setAssets((prev) => [...prev, ...nextAssets])
+    setTabAssets((prev) => ({
+      ...prev,
+      [activeTab]: [...prev[activeTab], ...nextAssets],
+    }))
     setShowImportModal(false)
     event.currentTarget.value = ''
+  }
+
+  const handleImportFromResults = async () => {
+    const resultTabs = TAB_ORDER.filter((tab) => tab !== activeTab)
+    const sourceAssets: ImageAsset[] = []
+
+    for (const tab of resultTabs) {
+      if (tab === 'slice') {
+        sourceAssets.push(
+          ...slicePreviewItems.map((item) => ({
+            id: item.id,
+            name: `slice_${item.index}.png`,
+            format: 'png' as const,
+            width: item.width,
+            height: item.height,
+            size: 0,
+            objectUrl: item.objectUrl,
+            file: new File([], `slice_${item.index}.png`),
+          })),
+        )
+      } else if (tab === 'matting') {
+        sourceAssets.push(
+          ...tabAssets.matting
+            .filter((asset) => Boolean(mattingResults[asset.id]))
+            .map((asset) => ({
+              ...asset,
+              format: 'png' as const,
+              objectUrl: mattingResults[asset.id].outputUrl,
+              size: 0,
+              file: new File([], asset.name.replace(/\.[^.]+$/, '') + '_matted.png'),
+            })),
+        )
+      } else if (tab === 'timeline') {
+        sourceAssets.push(...(timelineAssets as ImageAsset[]))
+      } else if (tab === 'scale') {
+        sourceAssets.push(...tabAssets.scale)
+      }
+    }
+
+    if (sourceAssets.length === 0) return
+
+    const cloned = await Promise.all(
+      sourceAssets.map((asset, index) => cloneAssetForImport(asset, asset.name.replace(/\.[^.]+$/, '') + `_imported_${index + 1}`)),
+    )
+    replaceAssetsForTab(activeTab, cloned)
+    setShowImportModal(false)
   }
 
   const runExport = async () => {
@@ -483,7 +645,9 @@ export function ProcessPage() {
 
     setExportStatus(`正在生成 ${exportTargets.length} 个导出文件...`)
     const downloads = await exportAssetsByRule(exportTargets, { prefix, startIndex, digits, suffix, format })
-    triggerDownloads(downloads)
+    triggerDownloads(downloads, {
+      zipFileName: `${prefix || '素材'}-批量.zip`,
+    })
     setExportStatus(`已触发下载：${downloads.length} 个文件`)
     setShowExportModal(false)
   }
@@ -518,10 +682,15 @@ export function ProcessPage() {
   }
 
   const renderImportExportActions = () => (
-    <div className="action-row process-transfer-row">
-      <button type="button" className="btn ghost" onClick={() => setShowImportModal(true)}>导入</button>
-      <button type="button" className="btn ghost" onClick={() => setShowExportModal(true)}>导出</button>
-      <span className="hint">导入/导出参数通过弹窗设置</span>
+    <div className="action-row process-transfer-row process-transfer-row-split">
+      <div className="process-transfer-left">
+        <button type="button" className="btn ghost" onClick={() => setShowImportModal(true)}>导入</button>
+        <button type="button" className="btn ghost" onClick={handleImportFromResults}>导入结果</button>
+        <button type="button" className="btn ghost" onClick={() => replaceAssetsForTab(activeTab, [])}>清空</button>
+      </div>
+      <div className="process-transfer-right">
+        <button type="button" className="btn ghost" onClick={() => setShowExportModal(true)}>导出</button>
+      </div>
     </div>
   )
 
@@ -546,9 +715,6 @@ export function ProcessPage() {
 
   return (
     <section className="card">
-      <h2>处理面板</h2>
-      <p>每个处理标签页都有独立素材选择，不共享选中状态。</p>
-
       <div className="tabs-row" role="tablist" aria-label="处理功能分页" onKeyDown={switchTabByKeyboard}>
         {TAB_ORDER.map((tab) => (
           <button
@@ -569,13 +735,14 @@ export function ProcessPage() {
       </div>
 
       <div className="panel asset-picker-panel">
+        {renderImportExportActions()}
         <HorizontalImageScroller
           title="素材选择"
           items={assetScrollerItems}
           selectedId={selectedAssetsByTab[activeTab]}
           onSelect={(id) => setSelectedAssetForTab(activeTab, id)}
           onZoom={(id) => {
-            const target = assets.find((item) => item.id === id)
+            const target = activeTabAssets.find((item) => item.id === id)
             if (target) setSelectedAssetPreview(target)
           }}
           emptyText="暂无素材，请先导入"
@@ -586,7 +753,6 @@ export function ProcessPage() {
         <div className="split-grid" role="tabpanel" aria-label="切分标签内容">
           <div className="panel">
             <h3>切分参数</h3>
-            {renderImportExportActions()}
             <div className="field-grid">
               <label>切分模式</label>
               <select className="input" value={sliceConfig.mode} onChange={(e) => setSliceConfig((prev) => ({ ...prev, mode: e.target.value as 'fixed_size' | 'fixed_count' | 'line_detect' }))}>
@@ -726,7 +892,6 @@ export function ProcessPage() {
       {activeTab === 'scale' && (
         <div className="panel" role="tabpanel" aria-label="缩放标签内容">
           <h3>缩放预览（仅缩小）</h3>
-          {renderImportExportActions()}
           <div className="field-grid two-col">
             <label>缩放模式</label>
             <select className="input" value={scaleConfig.mode} onChange={(e) => setScaleConfig((prev) => ({ ...prev, mode: e.target.value as 'ratio' | 'target' }))}>
@@ -762,7 +927,18 @@ export function ProcessPage() {
       {activeTab === 'matting' && (
         <div className="panel" style={{ marginTop: 14 }} role="tabpanel" aria-label="抠图标签内容">
           <h3>抠图处理</h3>
-          {renderImportExportActions()}
+          {mattingAsset && (
+            <div className="matting-compare">
+              <div>
+                <h4>原图</h4>
+                <img className="matting-img" src={mattingAsset.objectUrl} alt={`${mattingAsset.name}-origin`} />
+              </div>
+              <div>
+                <h4>抠图结果</h4>
+                {mattingResults[mattingAsset.id] ? <img className="matting-img" src={mattingResults[mattingAsset.id].outputUrl} alt={`${mattingAsset.name}-matted`} /> : <div className="empty">尚未生成抠图结果</div>}
+              </div>
+            </div>
+          )}
           <div className="field-grid two-col">
             <label>算法</label>
             <select className="input" value={mattingConfig.algorithm} onChange={(e) => setMattingConfig((prev) => ({ ...prev, algorithm: e.target.value as MattingConfig['algorithm'] }))}>
@@ -797,6 +973,26 @@ export function ProcessPage() {
               />
               先检测并去除外边框（四边可独立存在）
             </label>
+            <label>抠除（X / Y）</label>
+            <div className="trim-input-row">
+              <input
+                className="input"
+                type="number"
+                min={0}
+                value={mattingConfig.trimBorderX}
+                onChange={(e) => updateMattingTrim('x', e.target.value)}
+                placeholder="X"
+              />
+              <span className="hint">/</span>
+              <input
+                className="input"
+                type="number"
+                min={0}
+                value={mattingConfig.trimBorderY}
+                onChange={(e) => updateMattingTrim('y', e.target.value)}
+                placeholder="Y"
+              />
+            </div>
             <label>背景色（色键）</label>
             <input className="input" type="color" value={mattingConfig.bgColorHex} onChange={(e) => setMattingConfig((prev) => ({ ...prev, bgColorHex: e.target.value }))} />
             <label>ONNX 模型路径</label>
@@ -805,30 +1001,16 @@ export function ProcessPage() {
 
           <div className="action-row">
             <button type="button" className="btn" onClick={handleSingleMatting} disabled={!mattingAsset || processingBatch}>单图预览</button>
-            <button type="button" className="btn" onClick={handleBatchMatting} disabled={assets.length === 0 || processingBatch}>{processingBatch ? '批量处理中...' : '批量抠图'}</button>
+            <button type="button" className="btn" onClick={handleBatchMatting} disabled={tabAssets.matting.length === 0 || processingBatch}>{processingBatch ? '批量处理中...' : '批量抠图'}</button>
             <button type="button" className="btn ghost" onClick={applyOverrideForActive} disabled={!mattingAsset || processingBatch}>当前图设为例外参数并重跑</button>
             <span className="hint">{mattingStatus}</span>
           </div>
-
-          {mattingAsset && (
-            <div className="matting-compare">
-              <div>
-                <h4>原图</h4>
-                <img className="matting-img" src={mattingAsset.objectUrl} alt={`${mattingAsset.name}-origin`} />
-              </div>
-              <div>
-                <h4>抠图结果</h4>
-                {mattingResults[mattingAsset.id] ? <img className="matting-img" src={mattingResults[mattingAsset.id].outputUrl} alt={`${mattingAsset.name}-matted`} /> : <div className="empty">尚未生成抠图结果</div>}
-              </div>
-            </div>
-          )}
         </div>
       )}
 
       {activeTab === 'timeline' && (
         <div className="panel" style={{ marginTop: 14 }} role="tabpanel" aria-label="动画标签内容">
           <h3>帧动画时间线</h3>
-          {renderImportExportActions()}
           <div className="action-row">
             <button type="button" className="btn" onClick={() => setIsPlaying((prev) => !prev)} disabled={timelineAssets.length <= 1}>{isPlaying ? '暂停' : '播放'}</button>
             <label className="hint">FPS</label>
@@ -858,7 +1040,7 @@ export function ProcessPage() {
                 onDragOver={(e) => e.preventDefault()}
                 onDrop={() => {
                   if (dragFromIndex === null) return
-                  reorderTimelineFrame(dragFromIndex, idx)
+                  reorderTimelineFrameLocal(dragFromIndex, idx)
                   setDragFromIndex(null)
                 }}
                 onClick={() => setFrameIndex(idx)}
@@ -868,7 +1050,7 @@ export function ProcessPage() {
                   <div className="asset-name">#{idx + 1} {asset!.name}</div>
                   <small>{asset!.width}×{asset!.height}</small>
                 </div>
-                <button type="button" className="btn ghost" onClick={(event) => { event.stopPropagation(); removeTimelineFrame(asset!.id) }}>
+                <button type="button" className="btn ghost" onClick={(event) => { event.stopPropagation(); removeTimelineFrameLocal(asset!.id) }}>
                   删除
                 </button>
               </div>
@@ -876,17 +1058,6 @@ export function ProcessPage() {
           </div>
         </div>
       )}
-
-      <div className="kv-grid">
-        <div>默认输出格式</div>
-        <strong>{config?.defaultOutputFormat ?? '-'}</strong>
-        <div>默认并发</div>
-        <strong>{config?.concurrency ?? '-'}</strong>
-        <div>当前平台</div>
-        <strong>{platform.os}</strong>
-        <div>已注册算法</div>
-        <strong>{providers.length > 0 ? providers.join('、') : '暂无'}</strong>
-      </div>
 
       {showImportModal && (
         <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="导入素材">
@@ -896,7 +1067,6 @@ export function ProcessPage() {
             <div className="action-row">
               <label className="btn" htmlFor="process-file-input">选择图片</label>
               <input id="process-file-input" className="hidden-input" type="file" accept=".png,.jpg,.jpeg,.webp,.bmp" multiple onChange={handleImport} />
-              <button type="button" className="btn ghost" onClick={clearAssets}>清空素材</button>
               <button type="button" className="btn ghost" onClick={() => setShowImportModal(false)}>关闭</button>
             </div>
           </div>
@@ -909,13 +1079,15 @@ export function ProcessPage() {
             <h3>导出参数</h3>
             <div className="field-grid two-col">
               <label>导出范围</label>
-              <select className="input" value={exportScope} onChange={(e) => setExportScope(e.target.value as 'all' | 'active' | 'slice_preview')}>
-                <option value="all">全部素材</option>
-                <option value="active">当前素材</option>
-                {activeTab === 'slice' && <option value="slice_preview">切分预览结果</option>}
+              <select className="input" value={exportScope} onChange={(e) => setExportScope(e.target.value as 'all' | 'selected')}>
+                <option value="all">全部导出</option>
+                <option value="selected">导出选中</option>
               </select>
               <label>文件名前缀</label>
-              <input className="input" value={prefix} onChange={(e) => setPrefix(e.target.value)} />
+              <input className="input" value={prefix} onChange={(e) => {
+                setPrefixTouched(true)
+                setPrefix(e.target.value)
+              }} />
               <label>起始序号</label>
               <input className="input" type="number" value={startIndex} onChange={(e) => setStartIndex(Math.max(0, Number(e.target.value) || 0))} />
               <label>序号位数</label>
@@ -937,7 +1109,7 @@ export function ProcessPage() {
                 selectedId={selectedExportPreviewId}
                 onSelect={(id) => setSelectedExportPreviewId(id)}
                 onZoom={(id) => {
-                  const target = exportTargets.find((item) => item.id === id)
+                  const target = processedAssetsForActiveTab.find((item) => item.id === id)
                   if (!target) return
                   setExportPreviewLightbox({
                     imageUrl: target.objectUrl,

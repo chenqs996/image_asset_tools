@@ -2,9 +2,13 @@ import { useMemo, useState } from 'react'
 import { useWorkspace } from '../../core/state/useWorkspace'
 import { exportAssetsByRule, triggerDownloads, type ExportFormat } from '../../utils/exportUtils'
 
+function fileNameWithoutExt(name: string) {
+  return name.replace(/\.[^.]+$/, '')
+}
+
 export function ExportPage() {
   const { assets } = useWorkspace()
-  const [prefix, setPrefix] = useState('asset')
+  const [prefix, setPrefix] = useState(() => (assets[0] ? fileNameWithoutExt(assets[0].name) : 'asset'))
   const [startIndex, setStartIndex] = useState(1)
   const [digits, setDigits] = useState(3)
   const [suffix, setSuffix] = useState('')
@@ -34,7 +38,9 @@ export function ExportPage() {
       suffix,
       format,
     })
-    triggerDownloads(downloads)
+    triggerDownloads(downloads, {
+      zipFileName: `${prefix || '素材'}-批量.zip`,
+    })
     setStatus(`已触发下载：${downloads.length} 个文件`)
   }
 

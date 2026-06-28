@@ -241,6 +241,23 @@ nav {
   margin-bottom: 12px;
 }
 
+.asset-picker-panel .process-transfer-row {
+  margin-top: 0;
+  margin-bottom: 12px;
+}
+
+.process-transfer-row-split {
+  justify-content: space-between;
+}
+
+.process-transfer-left,
+.process-transfer-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
 .field-grid {
   display: grid;
   grid-template-columns: 1fr;
@@ -250,6 +267,13 @@ nav {
 .field-grid label {
   color: #9fb0cc;
   font-size: 13px;
+}
+
+.trim-input-row {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: 8px;
 }
 
 .input {

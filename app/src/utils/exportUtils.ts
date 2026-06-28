@@ -11,6 +11,10 @@ export interface ExportRule {
   format: ExportFormat
 }
 
+export interface DownloadTriggerOptions {
+  zipFileName?: string
+}
+
 function toExt(format: ExportFormat) {
   if (format === 'BMP') return 'bmp'
   if (format === 'WebP') return 'webp'
@@ -69,7 +73,7 @@ export async function exportAssetsByRule(assets: ImageAsset[], rule: ExportRule)
   return downloads
 }
 
-export function triggerDownloads(items: Array<{ fileName: string; url: string }>) {
+export function triggerDownloads(items: Array<{ fileName: string; url: string }>, options?: DownloadTriggerOptions) {
   if (items.length <= 0) return
 
   if (items.length === 1) {
@@ -99,10 +103,9 @@ export function triggerDownloads(items: Array<{ fileName: string; url: string }>
     .then(async () => {
       const zipBlob = await zip.generateAsync({ type: 'blob' })
       const zipUrl = URL.createObjectURL(zipBlob)
-      const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
       const a = document.createElement('a')
       a.href = zipUrl
-      a.download = `批量导出-${stamp}.zip`
+      a.download = options?.zipFileName?.trim() ? options.zipFileName : '批量导出.zip'
       document.body.appendChild(a)
       a.click()
       a.remove()
