@@ -1,0 +1,39 @@
+{
+  "name": "app",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "lint": "oxlint",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "verify": "npm run lint && npm run test && npm run build",
+    "acceptance:test": "bash ./scripts/run_acceptance_tests.sh",
+    "run:dev": "bash ./scripts/run_app.sh dev",
+    "run:preview": "bash ./scripts/run_app.sh preview",
+    "run:open": "bash ./scripts/run_app_and_open.sh dev",
+    "run:open:preview": "bash ./scripts/run_app_and_open.sh preview",
+    "run:debug": "bash ./scripts/run_app_with_logs.sh dev",
+    "run:debug:preview": "bash ./scripts/run_app_with_logs.sh preview"
+  },
+  "dependencies": {
+    "jszip": "^3.10.1",
+    "onnxruntime-web": "^1.27.0",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "react-router-dom": "^7.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.2",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.2",
+    "oxlint": "^1.69.0",
+    "typescript": "~6.0.2",
+    "vite": "^8.1.0",
+    "vitest": "^4.1.9"
+  }
+}

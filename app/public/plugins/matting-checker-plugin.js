@@ -1,0 +1,21 @@
+const provider = {
+  manifest: {
+    id: 'matting.checker.fast.v1',
+    type: 'matting',
+    version: '1.0.0',
+    displayName: '灰白方格快速插件（示例）',
+    entry: '/plugins/matting-checker-plugin.js',
+    runtime: 'native',
+    capabilities: {
+      backgrounds: ['gray-grid'],
+      supportsEdgePreference: true,
+      supportsPreview: true,
+      supportsBatch: true,
+    },
+  },
+  validateConfig() {
+    return { valid: true }
+  },
+}
+
+export default provider
