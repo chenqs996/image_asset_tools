@@ -53,14 +53,24 @@ interface BorderTrim {
   left: number
 }
 
-function mergeBorderTrim(autoTrim: BorderTrim | null, manualX: number, manualY: number, width: number, height: number): BorderTrim | null {
-  const safeX = clamp(Math.floor(manualX), 0, Math.floor(width / 2))
-  const safeY = clamp(Math.floor(manualY), 0, Math.floor(height / 2))
+function mergeBorderTrim(
+  autoTrim: BorderTrim | null,
+  manualTop: number,
+  manualRight: number,
+  manualBottom: number,
+  manualLeft: number,
+  width: number,
+  height: number,
+): BorderTrim | null {
+  const safeTop = clamp(Math.floor(manualTop), 0, Math.floor(height / 2))
+  const safeRight = clamp(Math.floor(manualRight), 0, Math.floor(width / 2))
+  const safeBottom = clamp(Math.floor(manualBottom), 0, Math.floor(height / 2))
+  const safeLeft = clamp(Math.floor(manualLeft), 0, Math.floor(width / 2))
   const merged: BorderTrim = {
-    top: Math.max(autoTrim?.top ?? 0, safeY),
-    right: Math.max(autoTrim?.right ?? 0, safeX),
-    bottom: Math.max(autoTrim?.bottom ?? 0, safeY),
-    left: Math.max(autoTrim?.left ?? 0, safeX),
+    top: Math.max(autoTrim?.top ?? 0, safeTop),
+    right: Math.max(autoTrim?.right ?? 0, safeRight),
+    bottom: Math.max(autoTrim?.bottom ?? 0, safeBottom),
+    left: Math.max(autoTrim?.left ?? 0, safeLeft),
   }
   return merged.top || merged.right || merged.bottom || merged.left ? merged : null
 }
@@ -124,58 +134,74 @@ function averageColAlpha(data: Uint8ClampedArray, width: number, height: number,
   return alpha / height
 }
 
-function rowTransparentRatio(data: Uint8ClampedArray, width: number, row: number, alphaThreshold: number) {
-  let transparent = 0
+function rowCoverageRatio(data: Uint8ClampedArray, width: number, row: number, alphaThreshold: number) {
+  let covered = 0
   for (let x = 0; x < width; x += 1) {
     const idx = (row * width + x) * 4
-    if (data[idx + 3] <= alphaThreshold) transparent += 1
+    if (data[idx + 3] > alphaThreshold) covered += 1
   }
-  return transparent / width
+  return covered / width
 }
 
-function colTransparentRatio(data: Uint8ClampedArray, width: number, height: number, col: number, alphaThreshold: number) {
-  let transparent = 0
+function colCoverageRatio(data: Uint8ClampedArray, width: number, height: number, col: number, alphaThreshold: number) {
+  let covered = 0
   for (let y = 0; y < height; y += 1) {
     const idx = (y * width + col) * 4
-    if (data[idx + 3] <= alphaThreshold) transparent += 1
+    if (data[idx + 3] > alphaThreshold) covered += 1
   }
-  return transparent / height
+  return covered / height
 }
 
-function isBorderRowLike(data: Uint8ClampedArray, width: number, row: number, ref: { r: number; g: number; b: number }) {
+function rowUniformity(data: Uint8ClampedArray, width: number, row: number, ref: { r: number; g: number; b: number }) {
   let similar = 0
-  const tolerance = 20
+  const tolerance = 24
   for (let x = 0; x < width; x += 1) {
     const idx = (row * width + x) * 4
     const dist = colorDistance(data[idx], data[idx + 1], data[idx + 2], ref.r, ref.g, ref.b)
     if (dist <= tolerance) similar += 1
   }
-  const similarRatio = similar / width
-  const avgAlpha = averageRowAlpha(data, width, row)
-  const transparentRatio = rowTransparentRatio(data, width, row, 36)
-  return transparentRatio >= 0.92 || (similarRatio >= 0.9 && avgAlpha <= 84)
+  return similar / width
 }
 
-function isBorderColLike(data: Uint8ClampedArray, width: number, height: number, col: number, ref: { r: number; g: number; b: number }) {
+function colUniformity(data: Uint8ClampedArray, width: number, height: number, col: number, ref: { r: number; g: number; b: number }) {
   let similar = 0
-  const tolerance = 20
+  const tolerance = 24
   for (let y = 0; y < height; y += 1) {
     const idx = (y * width + col) * 4
     const dist = colorDistance(data[idx], data[idx + 1], data[idx + 2], ref.r, ref.g, ref.b)
     if (dist <= tolerance) similar += 1
   }
-  const similarRatio = similar / height
-  const avgAlpha = averageColAlpha(data, width, height, col)
-  const transparentRatio = colTransparentRatio(data, width, height, col, 36)
-  return transparentRatio >= 0.92 || (similarRatio >= 0.9 && avgAlpha <= 84)
+  return similar / height
+}
+
+function isBorderRowLike(data: Uint8ClampedArray, width: number, row: number, innerRow: number) {
+  const rowColor = averageRowColor(data, width, row)
+  const innerColor = averageRowColor(data, width, innerRow)
+  const uniformity = rowUniformity(data, width, row, rowColor)
+  const colorContrast = colorDistance(rowColor.r, rowColor.g, rowColor.b, innerColor.r, innerColor.g, innerColor.b)
+  const alphaContrast = Math.abs(averageRowAlpha(data, width, row) - averageRowAlpha(data, width, innerRow))
+  const coverageRatio = rowCoverageRatio(data, width, row, 24)
+
+  const hasEdgeChange = colorContrast >= 16 || alphaContrast >= 20
+  const isLikelyLine = uniformity >= 0.88 && hasEdgeChange
+  return isLikelyLine && coverageRatio >= 0.26
+}
+
+function isBorderColLike(data: Uint8ClampedArray, width: number, height: number, col: number, innerCol: number) {
+  const colColor = averageColColor(data, width, height, col)
+  const innerColor = averageColColor(data, width, height, innerCol)
+  const uniformity = colUniformity(data, width, height, col, colColor)
+  const colorContrast = colorDistance(colColor.r, colColor.g, colColor.b, innerColor.r, innerColor.g, innerColor.b)
+  const alphaContrast = Math.abs(averageColAlpha(data, width, height, col) - averageColAlpha(data, width, height, innerCol))
+  const coverageRatio = colCoverageRatio(data, width, height, col, 24)
+
+  const hasEdgeChange = colorContrast >= 16 || alphaContrast >= 20
+  const isLikelyLine = uniformity >= 0.88 && hasEdgeChange
+  return isLikelyLine && coverageRatio >= 0.26
 }
 
 function detectOuterBorderTrim(data: Uint8ClampedArray, width: number, height: number): BorderTrim {
   const maxScan = Math.max(1, Math.min(24, Math.floor(Math.min(width, height) * 0.08)))
-  const topRef = averageRowColor(data, width, 0)
-  const bottomRef = averageRowColor(data, width, height - 1)
-  const leftRef = averageColColor(data, width, height, 0)
-  const rightRef = averageColColor(data, width, height, width - 1)
 
   let top = 0
   let bottom = 0
@@ -183,26 +209,30 @@ function detectOuterBorderTrim(data: Uint8ClampedArray, width: number, height: n
   let right = 0
 
   for (let i = 0; i < maxScan; i += 1) {
-    if (isBorderRowLike(data, width, i, topRef)) top += 1
+    if (i + 1 >= height) break
+    if (isBorderRowLike(data, width, i, i + 1)) top += 1
     else break
   }
 
   for (let i = 0; i < maxScan; i += 1) {
     const row = height - 1 - i
     if (row < top) break
-    if (isBorderRowLike(data, width, row, bottomRef)) bottom += 1
+    if (row - 1 < 0) break
+    if (isBorderRowLike(data, width, row, row - 1)) bottom += 1
     else break
   }
 
   for (let i = 0; i < maxScan; i += 1) {
-    if (isBorderColLike(data, width, height, i, leftRef)) left += 1
+    if (i + 1 >= width) break
+    if (isBorderColLike(data, width, height, i, i + 1)) left += 1
     else break
   }
 
   for (let i = 0; i < maxScan; i += 1) {
     const col = width - 1 - i
     if (col < left) break
-    if (isBorderColLike(data, width, height, col, rightRef)) right += 1
+    if (col - 1 < 0) break
+    if (isBorderColLike(data, width, height, col, col - 1)) right += 1
     else break
   }
 
@@ -215,6 +245,129 @@ function inTrimBorder(x: number, y: number, width: number, height: number, trim:
   if (trim.left > 0 && x < trim.left) return true
   if (trim.right > 0 && x >= width - trim.right) return true
   return false
+}
+
+async function loadImageFrame(asset: ImageAsset) {
+  const image = await new Promise<HTMLImageElement>((resolve, reject) => {
+    const img = new Image()
+    img.onload = () => resolve(img)
+    img.onerror = () => reject(new Error('IMAGE_LOAD_FAILED'))
+    img.src = asset.objectUrl
+  })
+
+  const canvas = document.createElement('canvas')
+  canvas.width = image.naturalWidth
+  canvas.height = image.naturalHeight
+  const ctx = canvas.getContext('2d')
+  if (!ctx) {
+    throw new Error('CANVAS_CONTEXT_FAILED')
+  }
+
+  ctx.drawImage(image, 0, 0)
+  const frame = ctx.getImageData(0, 0, canvas.width, canvas.height)
+  return { canvas, ctx, frame, pixels: frame.data }
+}
+
+function finalizeMattingOutput(canvas: HTMLCanvasElement, ctx: CanvasRenderingContext2D, frame: ImageData, warning?: string) {
+  ctx.putImageData(frame, 0, 0)
+  return new Promise<MattingResult>((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (!blob) {
+        reject(new Error('PNG_EXPORT_FAILED'))
+        return
+      }
+      resolve({
+        assetId: '',
+        outputUrl: URL.createObjectURL(blob),
+        algorithm: 'ai_general',
+        warning,
+      })
+    }, 'image/png')
+  })
+}
+
+function applyBorderTrimToFrame(pixels: Uint8ClampedArray, width: number, height: number, config: MattingConfig) {
+  const borderTrim = config.removeOuterBorder
+    ? detectOuterBorderTrim(pixels, width, height)
+    : mergeBorderTrim(
+        null,
+        config.trimBorderTop,
+        config.trimBorderRight,
+        config.trimBorderBottom,
+        config.trimBorderLeft,
+        width,
+        height,
+      )
+
+  let warning: string | undefined
+  if (borderTrim) {
+    const removed = borderTrim.top + borderTrim.right + borderTrim.bottom + borderTrim.left
+    if (removed > 0) {
+      for (let i = 0; i < pixels.length; i += 4) {
+        const idx = i / 4
+        const x = idx % width
+        const y = Math.floor(idx / width)
+        if (inTrimBorder(x, y, width, height, borderTrim)) {
+          pixels[i + 3] = 0
+        }
+      }
+
+      warning = `边框处理：上${borderTrim.top} 右${borderTrim.right} 下${borderTrim.bottom} 左${borderTrim.left}`
+    }
+  }
+
+  return warning
+}
+
+async function processBackgroundStage(asset: ImageAsset, config: MattingConfig): Promise<MattingResult> {
+  const { canvas, ctx, frame, pixels } = await loadImageFrame(asset)
+
+  let alpha = new Uint8ClampedArray(frame.data.length / 4)
+  let warning: string | undefined
+  let usedAiFallback = false
+
+  if (config.algorithm === 'chroma_key') {
+    alpha = runChromaKey(pixels, config)
+  } else if (config.algorithm === 'checkerboard') {
+    alpha = runCheckerboard(pixels, config)
+  } else {
+    const onnx = await ensureOnnxRuntime(config.modelPath)
+    alpha = runAiFallback(pixels, config)
+    usedAiFallback = true
+    if (!onnx.ready) {
+      warning = `ONNX Runtime未加载模型，已使用AI回退算法：${onnx.error}`
+    }
+  }
+
+  const smoothed = blurAlpha(alpha, canvas.width, canvas.height, config.smooth + config.feather)
+  const edgeBoost = config.edgePreference === 'clean_edge' ? -20 : 10
+
+  for (let i = 0; i < pixels.length; i += 4) {
+    const idx = i / 4
+    pixels[i + 3] = clamp(smoothed[idx] + edgeBoost, 0, 255)
+  }
+
+  if (usedAiFallback) {
+    suppressFallbackHalo(pixels, canvas.width, canvas.height, config.edgePreference)
+  }
+
+  const result = await finalizeMattingOutput(canvas, ctx, frame, warning)
+  return {
+    ...result,
+    assetId: asset.id,
+    algorithm: config.algorithm,
+  }
+}
+
+async function processBorderStage(asset: ImageAsset, config: MattingConfig): Promise<MattingResult> {
+  const { canvas, ctx, frame, pixels } = await loadImageFrame(asset)
+  const warning = applyBorderTrimToFrame(pixels, canvas.width, canvas.height, config)
+  const result = await finalizeMattingOutput(canvas, ctx, frame, warning)
+  return {
+    ...result,
+    assetId: asset.id,
+    algorithm: config.algorithm,
+  }
 }
 
 function runChromaKey(data: Uint8ClampedArray, config: MattingConfig) {
@@ -271,80 +424,80 @@ function runAiFallback(data: Uint8ClampedArray, config: MattingConfig) {
   return alpha
 }
 
-export async function runMatting(asset: ImageAsset, config: MattingConfig): Promise<MattingResult> {
-  const image = await new Promise<HTMLImageElement>((resolve, reject) => {
-    const img = new Image()
-    img.onload = () => resolve(img)
-    img.onerror = () => reject(new Error('IMAGE_LOAD_FAILED'))
-    img.src = asset.objectUrl
-  })
-
-  const canvas = document.createElement('canvas')
-  canvas.width = image.naturalWidth
-  canvas.height = image.naturalHeight
-  const ctx = canvas.getContext('2d')
-  if (!ctx) {
-    throw new Error('CANVAS_CONTEXT_FAILED')
+function suppressFallbackHalo(
+  pixels: Uint8ClampedArray,
+  width: number,
+  height: number,
+  edgePreference: MattingConfig['edgePreference'],
+) {
+  const alphaCopy = new Uint8ClampedArray(width * height)
+  for (let i = 0; i < alphaCopy.length; i += 1) {
+    alphaCopy[i] = pixels[i * 4 + 3]
   }
 
-  ctx.drawImage(image, 0, 0)
-  const frame = ctx.getImageData(0, 0, canvas.width, canvas.height)
-  const pixels = frame.data
+  const aggressive = edgePreference === 'clean_edge'
+  const lowCut = aggressive ? 56 : 40
+  const midCut = aggressive ? 152 : 132
+  const strongOpaque = 200
 
-  let alpha = new Uint8ClampedArray(frame.data.length / 4)
-  let warning: string | undefined
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const idx = y * width + x
+      const px = idx * 4
+      const a = alphaCopy[idx]
 
-  if (config.algorithm === 'chroma_key') {
-    alpha = runChromaKey(pixels, config)
-  } else if (config.algorithm === 'checkerboard') {
-    alpha = runCheckerboard(pixels, config)
-  } else {
-    const onnx = await ensureOnnxRuntime(config.modelPath)
-    alpha = runAiFallback(pixels, config)
-    if (!onnx.ready) {
-      warning = `ONNX Runtime未加载模型，已使用AI回退算法：${onnx.error}`
-    }
-  }
+      if (a <= lowCut) {
+        pixels[px + 3] = 0
+        continue
+      }
 
-  const smoothed = blurAlpha(alpha, canvas.width, canvas.height, config.smooth + config.feather)
-  const edgeBoost = config.edgePreference === 'clean_edge' ? -20 : 10
+      if (a < midCut) {
+        let support = 0
+        for (let dy = -1; dy <= 1; dy += 1) {
+          for (let dx = -1; dx <= 1; dx += 1) {
+            if (dx === 0 && dy === 0) continue
+            const nx = x + dx
+            const ny = y + dy
+            if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue
+            const na = alphaCopy[ny * width + nx]
+            if (na >= strongOpaque) support += 1
+          }
+        }
 
-  for (let i = 0; i < pixels.length; i += 4) {
-    const idx = i / 4
-    pixels[i + 3] = clamp(smoothed[idx] + edgeBoost, 0, 255)
-  }
+        if (support <= (aggressive ? 2 : 1)) {
+          pixels[px + 3] = 0
+          continue
+        }
 
-  const autoBorderTrim = config.removeOuterBorder ? detectOuterBorderTrim(pixels, canvas.width, canvas.height) : null
-  const borderTrim = mergeBorderTrim(autoBorderTrim, config.trimBorderX, config.trimBorderY, canvas.width, canvas.height)
-
-  if (borderTrim) {
-    const removed = borderTrim.top + borderTrim.right + borderTrim.bottom + borderTrim.left
-    if (removed > 0) {
-      for (let i = 0; i < pixels.length; i += 4) {
-        const idx = i / 4
-        const x = idx % canvas.width
-        const y = Math.floor(idx / canvas.width)
-        if (inTrimBorder(x, y, canvas.width, canvas.height, borderTrim)) {
-          pixels[i + 3] = 0
+        if (support <= (aggressive ? 4 : 3)) {
+          pixels[px + 3] = Math.min(a, aggressive ? 96 : 112)
         }
       }
 
-      const trimHint = `边框处理：上${borderTrim.top} 右${borderTrim.right} 下${borderTrim.bottom} 左${borderTrim.left}`
-      warning = warning ? `${warning}；${trimHint}` : trimHint
+      const outA = pixels[px + 3]
+      if (outA > 0 && outA < 120) {
+        const factor = clamp(outA / 120, 0.45, 1)
+        pixels[px] = Math.round(pixels[px] * factor)
+        pixels[px + 1] = Math.round(pixels[px + 1] * factor)
+        pixels[px + 2] = Math.round(pixels[px + 2] * factor)
+      }
     }
   }
+}
 
-  ctx.putImageData(frame, 0, 0)
-  const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/png'))
-  if (!blob) {
-    throw new Error('PNG_EXPORT_FAILED')
+export async function runMatting(asset: ImageAsset, config: MattingConfig): Promise<MattingResult> {
+  const background = await processBackgroundStage(asset, config)
+  try {
+    return await processBorderStage({ ...asset, objectUrl: background.outputUrl }, config)
+  } finally {
+    URL.revokeObjectURL(background.outputUrl)
   }
+}
 
-  const outputUrl = URL.createObjectURL(blob)
-  return {
-    assetId: asset.id,
-    outputUrl,
-    algorithm: config.algorithm,
-    warning,
-  }
+export async function runMattingBackground(asset: ImageAsset, config: MattingConfig): Promise<MattingResult> {
+  return processBackgroundStage(asset, config)
+}
+
+export async function runMattingBorder(asset: ImageAsset, config: MattingConfig): Promise<MattingResult> {
+  return processBorderStage(asset, config)
 }

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent, type KeyboardEvent } from 'react'
 import { importImageFiles } from '../../core/services/imageImportService'
-import { runMatting } from '../../core/services/mattingService'
+import { runMattingBackground, runMattingBorder } from '../../core/services/mattingService'
 import { providerRegistry } from '../../core/services/providerRegistry'
 import { useWorkspace } from '../../core/state/useWorkspace'
 import { DEFAULT_MATTING_CONFIG, type MattingConfig, type MattingResult } from '../../types/matting'
@@ -10,6 +10,7 @@ import { exportAssetsByRule, triggerDownloads, type ExportFormat } from '../../u
 import { generateSliceRects } from '../../utils/sliceGrid'
 import { detectSplitLinesFromUrl } from '../../utils/lineDetect'
 import { buildScalePreview } from '../../utils/scalePreview'
+import { ProcessActionCard } from '../components/ProcessActionCard'
 import { HorizontalImageScroller, type HorizontalImageScrollerItem } from '../components/HorizontalImageScroller'
 
 type ProcessTab = 'slice' | 'scale' | 'matting' | 'timeline'
@@ -24,7 +25,20 @@ interface SlicePreviewItem {
   objectUrl: string
 }
 
+interface InternalImportOption {
+  id: string
+  label: string
+  assets: ImageAsset[]
+}
+
 const TAB_ORDER: ProcessTab[] = ['slice', 'scale', 'matting', 'timeline']
+
+const TAB_LABELS: Record<ProcessTab, string> = {
+  slice: '切分',
+  scale: '缩放',
+  matting: '调整图片',
+  timeline: '动画',
+}
 
 function createEmptyTabAssets(): Record<ProcessTab, ImageAsset[]> {
   return {
@@ -67,9 +81,9 @@ export function ProcessPage() {
   const [draggingLine, setDraggingLine] = useState<{ axis: 'x' | 'y'; line: number } | null>(null)
   const [mattingConfig, setMattingConfig] = useState<MattingConfig>(DEFAULT_MATTING_CONFIG)
   const [mattingResults, setMattingResults] = useState<Record<string, MattingResult>>({})
-  const [mattingOverrides, setMattingOverrides] = useState<Record<string, Partial<MattingConfig>>>({})
   const [mattingStatus, setMattingStatus] = useState('')
-  const [processingBatch, setProcessingBatch] = useState(false)
+  const [mattingProcessing, setMattingProcessing] = useState(false)
+  const [showMattingConfigModal, setShowMattingConfigModal] = useState(false)
   const [isPlaying, setIsPlaying] = useState(false)
   const [frameIndex, setFrameIndex] = useState(0)
   const [dragFromIndex, setDragFromIndex] = useState<number | null>(null)
@@ -84,6 +98,7 @@ export function ProcessPage() {
   const [slicePreviewItems, setSlicePreviewItems] = useState<SlicePreviewItem[]>([])
   const [slicePreviewStatus, setSlicePreviewStatus] = useState('')
   const [showImportModal, setShowImportModal] = useState(false)
+  const [showInternalImportList, setShowInternalImportList] = useState(false)
   const [showExportModal, setShowExportModal] = useState(false)
   const [prefix, setPrefix] = useState('asset')
   const [prefixTouched, setPrefixTouched] = useState(false)
@@ -216,6 +231,53 @@ export function ProcessPage() {
       return [...existing, ...append]
     })
   }, [tabAssets.timeline])
+
+  const internalImportOptions = useMemo<InternalImportOption[]>(() => {
+    const sourceTabs = TAB_ORDER.filter((tab) => tab !== activeTab)
+    const options: InternalImportOption[] = []
+
+    for (const tab of sourceTabs) {
+      options.push({
+        id: `${tab}:original`,
+        label: TAB_LABELS[tab],
+        assets: tabAssets[tab],
+      })
+
+      let resultAssets: ImageAsset[] = []
+      if (tab === 'slice') {
+        resultAssets = slicePreviewItems.map((item) => ({
+          id: item.id,
+          name: `slice_${item.index}.png`,
+          format: 'png' as const,
+          width: item.width,
+          height: item.height,
+          size: 0,
+          objectUrl: item.objectUrl,
+          file: new File([], `slice_${item.index}.png`),
+        }))
+      } else if (tab === 'matting') {
+        resultAssets = tabAssets.matting
+          .filter((asset) => Boolean(mattingResults[asset.id]))
+          .map((asset) => ({
+            ...asset,
+            format: 'png' as const,
+            objectUrl: mattingResults[asset.id].outputUrl,
+            size: 0,
+            file: new File([], asset.name.replace(/\.[^.]+$/, '') + '_matted.png'),
+          }))
+      } else if (tab === 'timeline') {
+        resultAssets = timelineAssets as ImageAsset[]
+      }
+
+      options.push({
+        id: `${tab}:result`,
+        label: `${TAB_LABELS[tab]}处理结果`,
+        assets: resultAssets,
+      })
+    }
+
+    return options.sort((a, b) => a.label.localeCompare(b.label, 'zh-CN'))
+  }, [activeTab, mattingResults, slicePreviewItems, tabAssets, timelineAssets])
 
   const processedAssetsForActiveTab = useMemo<ImageAsset[]>(() => {
     if (activeTab === 'slice') {
@@ -456,28 +518,39 @@ export function ProcessPage() {
     setMattingConfig((prev) => ({ ...prev, [key]: Number.isFinite(parsed) ? parsed : 0 }))
   }
 
-  const updateMattingTrim = (axis: 'x' | 'y', value: string) => {
+  const updateMattingTrim = (side: 'top' | 'right' | 'bottom' | 'left', value: string) => {
     const parsed = Math.max(0, Number(value) || 0)
     setMattingConfig((prev) => {
-      const untouched = prev.trimBorderX === 0 && prev.trimBorderY === 0
-      if (untouched) {
-        return {
-          ...prev,
-          trimBorderX: parsed,
-          trimBorderY: parsed,
-        }
+      if (side === 'top') {
+        return { ...prev, removeOuterBorder: false, trimBorderTop: parsed }
       }
-
-      return axis === 'x'
-        ? { ...prev, trimBorderX: parsed }
-        : { ...prev, trimBorderY: parsed }
+      if (side === 'right') {
+        return { ...prev, removeOuterBorder: false, trimBorderRight: parsed }
+      }
+      if (side === 'bottom') {
+        return { ...prev, removeOuterBorder: false, trimBorderBottom: parsed }
+      }
+      return { ...prev, removeOuterBorder: false, trimBorderLeft: parsed }
     })
   }
 
-  const mergedConfigForAsset = (assetId: string): MattingConfig => ({
-    ...mattingConfig,
-    ...(mattingOverrides[assetId] ?? {}),
-  })
+  const setBorderMode = (mode: 'auto' | 'manual') => {
+    setMattingConfig((prev) =>
+      mode === 'auto'
+        ? {
+            ...prev,
+            removeOuterBorder: true,
+            trimBorderTop: 0,
+            trimBorderRight: 0,
+            trimBorderBottom: 0,
+            trimBorderLeft: 0,
+          }
+        : {
+            ...prev,
+            removeOuterBorder: false,
+          },
+    )
+  }
 
   const setMattingResult = (result: MattingResult) => {
     setMattingResults((prev) => {
@@ -487,34 +560,92 @@ export function ProcessPage() {
     })
   }
 
-  const handleSingleMatting = async () => {
+  const resetMattingForCurrent = () => {
     if (!mattingAsset) return
-    setMattingStatus(`处理中：${mattingAsset.name}`)
-    const result = await runMatting(mattingAsset, mergedConfigForAsset(mattingAsset.id))
-    setMattingResult(result)
-    setMattingStatus(result.warning ?? '单图预览完成')
+    setMattingResults((prev) => {
+      const current = prev[mattingAsset.id]
+      if (current) URL.revokeObjectURL(current.outputUrl)
+      const { [mattingAsset.id]: _removed, ...rest } = prev
+      return rest
+    })
+    setMattingStatus(`已重置：${mattingAsset.name}`)
   }
 
-  const handleBatchMatting = async () => {
-    if (tabAssets.matting.length === 0) return
-    setProcessingBatch(true)
-    let finished = 0
-    for (const asset of tabAssets.matting) {
-      setMattingStatus(`批量处理中 ${finished + 1}/${tabAssets.matting.length}：${asset.name}`)
-      const result = await runMatting(asset, mergedConfigForAsset(asset.id))
-      setMattingResult(result)
-      finished += 1
+  const resetMattingForAll = () => {
+    setMattingResults((prev) => {
+      Object.values(prev).forEach((item) => URL.revokeObjectURL(item.outputUrl))
+      return {}
+    })
+    setMattingStatus('已重置全部图片改动')
+  }
+
+  const getMattingSourceAsset = (asset: ImageAsset) => {
+    const latestResult = mattingResults[asset.id]
+    if (!latestResult) return asset
+    return {
+      ...asset,
+      objectUrl: latestResult.outputUrl,
     }
-    setProcessingBatch(false)
-    setMattingStatus('批量抠图完成')
   }
 
-  const applyOverrideForActive = async () => {
+  const applyBackgroundToActive = async () => {
     if (!mattingAsset) return
-    setMattingOverrides((prev) => ({ ...prev, [mattingAsset.id]: { ...mattingConfig } }))
-    const result = await runMatting(mattingAsset, mattingConfig)
-    setMattingResult(result)
-    setMattingStatus(`已为 ${mattingAsset.name} 应用例外参数并重跑`)
+    setMattingProcessing(true)
+    setMattingStatus(`抠除背景处理中：${mattingAsset.name}`)
+    try {
+      const result = await runMattingBackground(getMattingSourceAsset(mattingAsset), mattingConfig)
+      setMattingResult(result)
+      setMattingStatus(result.warning ?? '抠除背景完成')
+    } finally {
+      setMattingProcessing(false)
+    }
+  }
+
+  const applyBackgroundToBatch = async () => {
+    if (tabAssets.matting.length === 0) return
+    setMattingProcessing(true)
+    try {
+      let finished = 0
+      for (const asset of tabAssets.matting) {
+        setMattingStatus(`批量抠除背景 ${finished + 1}/${tabAssets.matting.length}：${asset.name}`)
+        const result = await runMattingBackground(getMattingSourceAsset(asset), mattingConfig)
+        setMattingResult(result)
+        finished += 1
+      }
+      setMattingStatus('批量抠除背景完成')
+    } finally {
+      setMattingProcessing(false)
+    }
+  }
+
+  const applyBorderToActive = async () => {
+    if (!mattingAsset) return
+    setMattingProcessing(true)
+    setMattingStatus(`抠除边框处理中：${mattingAsset.name}`)
+    try {
+      const result = await runMattingBorder(getMattingSourceAsset(mattingAsset), mattingConfig)
+      setMattingResult(result)
+      setMattingStatus(result.warning ?? '抠除边框完成')
+    } finally {
+      setMattingProcessing(false)
+    }
+  }
+
+  const applyBorderToBatch = async () => {
+    if (tabAssets.matting.length === 0) return
+    setMattingProcessing(true)
+    try {
+      let finished = 0
+      for (const asset of tabAssets.matting) {
+        setMattingStatus(`批量抠除边框 ${finished + 1}/${tabAssets.matting.length}：${asset.name}`)
+        const result = await runMattingBorder(getMattingSourceAsset(asset), mattingConfig)
+        setMattingResult(result)
+        finished += 1
+      }
+      setMattingStatus('批量抠除边框完成')
+    } finally {
+      setMattingProcessing(false)
+    }
   }
 
   const revokeSlicePreviewItems = (items: SlicePreviewItem[]) => {
@@ -587,53 +718,20 @@ export function ProcessPage() {
       ...prev,
       [activeTab]: [...prev[activeTab], ...nextAssets],
     }))
+    setShowInternalImportList(false)
     setShowImportModal(false)
     event.currentTarget.value = ''
   }
 
-  const handleImportFromResults = async () => {
-    const resultTabs = TAB_ORDER.filter((tab) => tab !== activeTab)
-    const sourceAssets: ImageAsset[] = []
-
-    for (const tab of resultTabs) {
-      if (tab === 'slice') {
-        sourceAssets.push(
-          ...slicePreviewItems.map((item) => ({
-            id: item.id,
-            name: `slice_${item.index}.png`,
-            format: 'png' as const,
-            width: item.width,
-            height: item.height,
-            size: 0,
-            objectUrl: item.objectUrl,
-            file: new File([], `slice_${item.index}.png`),
-          })),
-        )
-      } else if (tab === 'matting') {
-        sourceAssets.push(
-          ...tabAssets.matting
-            .filter((asset) => Boolean(mattingResults[asset.id]))
-            .map((asset) => ({
-              ...asset,
-              format: 'png' as const,
-              objectUrl: mattingResults[asset.id].outputUrl,
-              size: 0,
-              file: new File([], asset.name.replace(/\.[^.]+$/, '') + '_matted.png'),
-            })),
-        )
-      } else if (tab === 'timeline') {
-        sourceAssets.push(...(timelineAssets as ImageAsset[]))
-      } else if (tab === 'scale') {
-        sourceAssets.push(...tabAssets.scale)
-      }
-    }
-
-    if (sourceAssets.length === 0) return
+  const handleImportFromInternal = async (optionId: string) => {
+    const option = internalImportOptions.find((item) => item.id === optionId)
+    if (!option || option.assets.length === 0) return
 
     const cloned = await Promise.all(
-      sourceAssets.map((asset, index) => cloneAssetForImport(asset, asset.name.replace(/\.[^.]+$/, '') + `_imported_${index + 1}`)),
+      option.assets.map((asset, index) => cloneAssetForImport(asset, asset.name.replace(/\.[^.]+$/, '') + `_imported_${index + 1}`)),
     )
     replaceAssetsForTab(activeTab, cloned)
+    setShowInternalImportList(false)
     setShowImportModal(false)
   }
 
@@ -684,8 +782,10 @@ export function ProcessPage() {
   const renderImportExportActions = () => (
     <div className="action-row process-transfer-row process-transfer-row-split">
       <div className="process-transfer-left">
-        <button type="button" className="btn ghost" onClick={() => setShowImportModal(true)}>导入</button>
-        <button type="button" className="btn ghost" onClick={handleImportFromResults}>导入结果</button>
+        <button type="button" className="btn ghost" onClick={() => {
+          setShowInternalImportList(false)
+          setShowImportModal(true)
+        }}>导入</button>
         <button type="button" className="btn ghost" onClick={() => replaceAssetsForTab(activeTab, [])}>清空</button>
       </div>
       <div className="process-transfer-right">
@@ -729,7 +829,7 @@ export function ProcessPage() {
             className={activeTab === tab ? 'tab-btn active' : 'tab-btn'}
             onClick={() => setActiveTab(tab)}
           >
-            {tab === 'slice' ? '切分' : tab === 'scale' ? '缩放' : tab === 'matting' ? '抠图' : '动画'}
+            {tab === 'slice' ? '切分' : tab === 'scale' ? '缩放' : tab === 'matting' ? '调整图片' : '动画'}
           </button>
         ))}
       </div>
@@ -925,85 +1025,122 @@ export function ProcessPage() {
       )}
 
       {activeTab === 'matting' && (
-        <div className="panel" style={{ marginTop: 14 }} role="tabpanel" aria-label="抠图标签内容">
-          <h3>抠图处理</h3>
-          {mattingAsset && (
-            <div className="matting-compare">
-              <div>
-                <h4>原图</h4>
-                <img className="matting-img" src={mattingAsset.objectUrl} alt={`${mattingAsset.name}-origin`} />
-              </div>
-              <div>
-                <h4>抠图结果</h4>
-                {mattingResults[mattingAsset.id] ? <img className="matting-img" src={mattingResults[mattingAsset.id].outputUrl} alt={`${mattingAsset.name}-matted`} /> : <div className="empty">尚未生成抠图结果</div>}
+        <div className="panel matting-panel" style={{ marginTop: 14 }} role="tabpanel" aria-label="调整图片标签内容">
+          <div className="panel matting-preview-panel">
+            <div className="preview-header-row">
+              <h3>预览</h3>
+              <div className="matting-preview-actions">
+                <button type="button" className="btn ghost" onClick={resetMattingForCurrent} disabled={!mattingAsset || mattingProcessing}>重置</button>
+                <button type="button" className="btn ghost" onClick={resetMattingForAll} disabled={Object.keys(mattingResults).length === 0 || mattingProcessing}>重置所有</button>
               </div>
             </div>
-          )}
-          <div className="field-grid two-col">
-            <label>算法</label>
-            <select className="input" value={mattingConfig.algorithm} onChange={(e) => setMattingConfig((prev) => ({ ...prev, algorithm: e.target.value as MattingConfig['algorithm'] }))}>
-              <option value="ai_general">AI通用（ONNX Runtime）</option>
-              <option value="chroma_key">纯色色键</option>
-              <option value="checkerboard">灰白方格专用</option>
-            </select>
-            <label>threshold</label>
-            <input className="input" type="number" value={mattingConfig.threshold} onChange={(e) => updateMattingNumber('threshold', e.target.value)} />
-            <label>smooth</label>
-            <input className="input" type="number" value={mattingConfig.smooth} onChange={(e) => updateMattingNumber('smooth', e.target.value)} />
-            <label>denoise</label>
-            <input className="input" type="number" value={mattingConfig.denoise} onChange={(e) => updateMattingNumber('denoise', e.target.value)} />
-            <label>feather</label>
-            <input className="input" type="number" value={mattingConfig.feather} onChange={(e) => updateMattingNumber('feather', e.target.value)} />
-            <label>边缘偏好</label>
-            <select className="input" value={mattingConfig.edgePreference} onChange={(e) => setMattingConfig((prev) => ({ ...prev, edgePreference: e.target.value as MattingConfig['edgePreference'] }))}>
-              <option value="keep_detail">保留细节</option>
-              <option value="clean_edge">去除毛边</option>
-            </select>
-            <label>自动去除外边框线条</label>
-            <label className="hint" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <input
-                type="checkbox"
-                checked={mattingConfig.removeOuterBorder}
-                onChange={(e) =>
-                  setMattingConfig((prev) => ({
-                    ...prev,
-                    removeOuterBorder: e.target.checked,
-                  }))
-                }
+            {mattingAsset ? (
+              <img
+                className="matting-img matting-preview-image"
+                src={mattingResults[mattingAsset.id]?.outputUrl ?? mattingAsset.objectUrl}
+                alt={`${mattingAsset.name}-preview`}
               />
-              先检测并去除外边框（四边可独立存在）
-            </label>
-            <label>抠除（X / Y）</label>
-            <div className="trim-input-row">
-              <input
-                className="input"
-                type="number"
-                min={0}
-                value={mattingConfig.trimBorderX}
-                onChange={(e) => updateMattingTrim('x', e.target.value)}
-                placeholder="X"
-              />
-              <span className="hint">/</span>
-              <input
-                className="input"
-                type="number"
-                min={0}
-                value={mattingConfig.trimBorderY}
-                onChange={(e) => updateMattingTrim('y', e.target.value)}
-                placeholder="Y"
-              />
-            </div>
-            <label>背景色（色键）</label>
-            <input className="input" type="color" value={mattingConfig.bgColorHex} onChange={(e) => setMattingConfig((prev) => ({ ...prev, bgColorHex: e.target.value }))} />
-            <label>ONNX 模型路径</label>
-            <input className="input" value={mattingConfig.modelPath} onChange={(e) => setMattingConfig((prev) => ({ ...prev, modelPath: e.target.value }))} />
+            ) : (
+              <div className="empty">请先导入素材。</div>
+            )}
           </div>
 
-          <div className="action-row">
-            <button type="button" className="btn" onClick={handleSingleMatting} disabled={!mattingAsset || processingBatch}>单图预览</button>
-            <button type="button" className="btn" onClick={handleBatchMatting} disabled={tabAssets.matting.length === 0 || processingBatch}>{processingBatch ? '批量处理中...' : '批量抠图'}</button>
-            <button type="button" className="btn ghost" onClick={applyOverrideForActive} disabled={!mattingAsset || processingBatch}>当前图设为例外参数并重跑</button>
-            <span className="hint">{mattingStatus}</span>
+          <div className="matting-stage-panel">
+            <ProcessActionCard
+              title="抠除背景"
+              density="compact"
+              actions={(
+                <>
+                  <button type="button" className="btn" onClick={applyBackgroundToActive} disabled={!mattingAsset || mattingProcessing}>应用</button>
+                  <button type="button" className="btn ghost" onClick={applyBackgroundToBatch} disabled={tabAssets.matting.length === 0 || mattingProcessing}>批量</button>
+                </>
+              )}
+              config={(
+                <div className="process-module-config-inline">
+                  <button type="button" className="btn ghost gear-btn" aria-label="打开算法配置" onClick={() => setShowMattingConfigModal(true)}>
+                    ⚙
+                  </button>
+                  <select className="input" value={mattingConfig.algorithm} onChange={(e) => setMattingConfig((prev) => ({ ...prev, algorithm: e.target.value as MattingConfig['algorithm'] }))}>
+                    <option value="ai_general">AI通用（ONNX Runtime）</option>
+                    <option value="chroma_key">纯色色键</option>
+                    <option value="checkerboard">灰白方格专用</option>
+                  </select>
+                </div>
+              )}
+            />
+
+            <ProcessActionCard
+              title="抠除边框"
+              density="compact"
+              actions={(
+                <>
+                  <button type="button" className="btn" onClick={applyBorderToActive} disabled={!mattingAsset || mattingProcessing}>应用</button>
+                  <button type="button" className="btn ghost" onClick={applyBorderToBatch} disabled={tabAssets.matting.length === 0 || mattingProcessing}>批量</button>
+                </>
+              )}
+              config={(
+                <div className="border-mode-config">
+                  <div className="border-mode-toggle">
+                    <label>
+                      <input type="radio" name="border-mode" checked={mattingConfig.removeOuterBorder} onChange={() => setBorderMode('auto')} />
+                      自动
+                    </label>
+                    <label>
+                      <input type="radio" name="border-mode" checked={!mattingConfig.removeOuterBorder} onChange={() => setBorderMode('manual')} />
+                      手动
+                    </label>
+                  </div>
+                  <div className="trim-input-grid-4">
+                    <label className="trim-field">
+                      <span>上:</span>
+                      <input
+                        className="input"
+                        type="number"
+                        min={0}
+                        value={mattingConfig.trimBorderTop}
+                        onChange={(e) => updateMattingTrim('top', e.target.value)}
+                        disabled={mattingConfig.removeOuterBorder}
+                      />
+                    </label>
+                    <label className="trim-field">
+                      <span>下:</span>
+                      <input
+                        className="input"
+                        type="number"
+                        min={0}
+                        value={mattingConfig.trimBorderBottom}
+                        onChange={(e) => updateMattingTrim('bottom', e.target.value)}
+                        disabled={mattingConfig.removeOuterBorder}
+                      />
+                    </label>
+                    <label className="trim-field">
+                      <span>左:</span>
+                      <input
+                        className="input"
+                        type="number"
+                        min={0}
+                        value={mattingConfig.trimBorderLeft}
+                        onChange={(e) => updateMattingTrim('left', e.target.value)}
+                        disabled={mattingConfig.removeOuterBorder}
+                      />
+                    </label>
+                    <label className="trim-field">
+                      <span>右:</span>
+                      <input
+                        className="input"
+                        type="number"
+                        min={0}
+                        value={mattingConfig.trimBorderRight}
+                        onChange={(e) => updateMattingTrim('right', e.target.value)}
+                        disabled={mattingConfig.removeOuterBorder}
+                      />
+                    </label>
+                  </div>
+                </div>
+              )}
+            />
+
+            <div className="hint matting-status">{mattingStatus}</div>
           </div>
         </div>
       )}
@@ -1059,6 +1196,83 @@ export function ProcessPage() {
         </div>
       )}
 
+      {showMattingConfigModal && (
+        <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="算法配置">
+          <div className="modal-card">
+            <h3>算法配置</h3>
+            <p className="hint">当前算法：{mattingConfig.algorithm === 'ai_general' ? 'AI通用（ONNX Runtime）' : mattingConfig.algorithm === 'chroma_key' ? '纯色色键' : '灰白方格专用'}</p>
+            <div className="matting-config-grid">
+              {mattingConfig.algorithm === 'ai_general' && (
+                <section className="matting-config-group">
+                  <h4>AI 通用参数</h4>
+                  <div className="field-grid two-col">
+                    <label>threshold</label>
+                    <input className="input" type="number" value={mattingConfig.threshold} onChange={(e) => updateMattingNumber('threshold', e.target.value)} />
+                    <label>smooth</label>
+                    <input className="input" type="number" value={mattingConfig.smooth} onChange={(e) => updateMattingNumber('smooth', e.target.value)} />
+                    <label>denoise</label>
+                    <input className="input" type="number" value={mattingConfig.denoise} onChange={(e) => updateMattingNumber('denoise', e.target.value)} />
+                    <label>feather</label>
+                    <input className="input" type="number" value={mattingConfig.feather} onChange={(e) => updateMattingNumber('feather', e.target.value)} />
+                    <label>边缘偏好</label>
+                    <select className="input" value={mattingConfig.edgePreference} onChange={(e) => setMattingConfig((prev) => ({ ...prev, edgePreference: e.target.value as MattingConfig['edgePreference'] }))}>
+                      <option value="keep_detail">保留细节</option>
+                      <option value="clean_edge">去除毛边</option>
+                    </select>
+                    <label>ONNX 模型路径</label>
+                    <input className="input" value={mattingConfig.modelPath} onChange={(e) => setMattingConfig((prev) => ({ ...prev, modelPath: e.target.value }))} />
+                  </div>
+                </section>
+              )}
+
+              {mattingConfig.algorithm === 'chroma_key' && (
+                <section className="matting-config-group">
+                  <h4>色键参数</h4>
+                  <div className="field-grid two-col">
+                    <label>threshold</label>
+                    <input className="input" type="number" value={mattingConfig.threshold} onChange={(e) => updateMattingNumber('threshold', e.target.value)} />
+                    <label>背景色（色键）</label>
+                    <input className="input" type="color" value={mattingConfig.bgColorHex} onChange={(e) => setMattingConfig((prev) => ({ ...prev, bgColorHex: e.target.value }))} />
+                    <label>smooth</label>
+                    <input className="input" type="number" value={mattingConfig.smooth} onChange={(e) => updateMattingNumber('smooth', e.target.value)} />
+                    <label>feather</label>
+                    <input className="input" type="number" value={mattingConfig.feather} onChange={(e) => updateMattingNumber('feather', e.target.value)} />
+                    <label>边缘偏好</label>
+                    <select className="input" value={mattingConfig.edgePreference} onChange={(e) => setMattingConfig((prev) => ({ ...prev, edgePreference: e.target.value as MattingConfig['edgePreference'] }))}>
+                      <option value="keep_detail">保留细节</option>
+                      <option value="clean_edge">去除毛边</option>
+                    </select>
+                  </div>
+                </section>
+              )}
+
+              {mattingConfig.algorithm === 'checkerboard' && (
+                <section className="matting-config-group">
+                  <h4>方格参数</h4>
+                  <div className="field-grid two-col">
+                    <label>threshold</label>
+                    <input className="input" type="number" value={mattingConfig.threshold} onChange={(e) => updateMattingNumber('threshold', e.target.value)} />
+                    <label>denoise</label>
+                    <input className="input" type="number" value={mattingConfig.denoise} onChange={(e) => updateMattingNumber('denoise', e.target.value)} />
+                    <label>feather</label>
+                    <input className="input" type="number" value={mattingConfig.feather} onChange={(e) => updateMattingNumber('feather', e.target.value)} />
+                    <label>边缘偏好</label>
+                    <select className="input" value={mattingConfig.edgePreference} onChange={(e) => setMattingConfig((prev) => ({ ...prev, edgePreference: e.target.value as MattingConfig['edgePreference'] }))}>
+                      <option value="keep_detail">保留细节</option>
+                      <option value="clean_edge">去除毛边</option>
+                    </select>
+                  </div>
+                </section>
+              )}
+            </div>
+
+            <div className="action-row">
+              <button type="button" className="btn ghost" onClick={() => setShowMattingConfigModal(false)}>关闭</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {showImportModal && (
         <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="导入素材">
           <div className="modal-card">
@@ -1066,9 +1280,30 @@ export function ProcessPage() {
             <p className="hint">支持 PNG/JPG/WebP/BMP，多选导入。</p>
             <div className="action-row">
               <label className="btn" htmlFor="process-file-input">选择图片</label>
+              <button type="button" className="btn ghost" onClick={() => setShowInternalImportList((prev) => !prev)}>从内部导入</button>
               <input id="process-file-input" className="hidden-input" type="file" accept=".png,.jpg,.jpeg,.webp,.bmp" multiple onChange={handleImport} />
-              <button type="button" className="btn ghost" onClick={() => setShowImportModal(false)}>关闭</button>
+              <button type="button" className="btn ghost" onClick={() => {
+                setShowInternalImportList(false)
+                setShowImportModal(false)
+              }}>关闭</button>
             </div>
+
+            {showInternalImportList && (
+              <div className="internal-import-list">
+                {internalImportOptions.map((option) => (
+                  <button
+                    key={option.id}
+                    type="button"
+                    className="btn ghost internal-import-option"
+                    disabled={option.assets.length === 0}
+                    onClick={() => handleImportFromInternal(option.id)}
+                  >
+                    <span>{option.label}</span>
+                    <span className="hint">{option.assets.length}</span>
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       )}
