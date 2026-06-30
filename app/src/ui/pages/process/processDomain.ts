@@ -89,7 +89,7 @@ export function toMattingResultAsset(asset: ImageAsset, result: MattingResult): 
 interface BuildInternalImportOptionsInput {
   activeTab: ProcessTab
   tabAssets: Record<ProcessTab, ImageAsset[]>
-  slicePreviewItems: SlicePreviewItem[]
+  sliceResultAssets: ImageAsset[]
   mattingResults: Record<string, MattingResult>
   timelineAssets: ImageAsset[]
 }
@@ -107,7 +107,7 @@ export function buildInternalImportOptions(input: BuildInternalImportOptionsInpu
 
     let resultAssets: ImageAsset[] = []
     if (tab === 'slice') {
-      resultAssets = input.slicePreviewItems.map(toSlicePreviewAsset)
+      resultAssets = input.sliceResultAssets
     } else if (tab === 'matting') {
       resultAssets = input.tabAssets.matting
         .filter((asset) => Boolean(input.mattingResults[asset.id]))
@@ -129,14 +129,14 @@ export function buildInternalImportOptions(input: BuildInternalImportOptionsInpu
 interface BuildProcessedAssetsForTabInput {
   activeTab: ProcessTab
   tabAssets: Record<ProcessTab, ImageAsset[]>
-  slicePreviewItems: SlicePreviewItem[]
+  sliceResultAssets: ImageAsset[]
   mattingResults: Record<string, MattingResult>
   timelineAssets: ImageAsset[]
 }
 
 export function buildProcessedAssetsForTab(input: BuildProcessedAssetsForTabInput): ImageAsset[] {
   if (input.activeTab === 'slice') {
-    return input.slicePreviewItems.map(toSlicePreviewAsset)
+    return input.sliceResultAssets
   }
 
   if (input.activeTab === 'matting') {

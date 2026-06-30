@@ -7,6 +7,7 @@ import type { ImageAsset } from '../../types/image'
 import { exportAssetsByRule, triggerDownloads, type ExportFormat } from '../../utils/exportUtils'
 import { generateSliceRects } from '../../utils/sliceGrid'
 import { detectSplitLinesFromUrl } from '../../utils/lineDetect'
+import { buildScalePreview } from '../../utils/scalePreview'
 import { ProcessActionCard } from '../components/ProcessActionCard'
 import { HorizontalImageScroller, type HorizontalImageScrollerItem } from '../components/HorizontalImageScroller'
 import { ProcessImportModal } from './process/components/ProcessImportModal'
@@ -22,15 +23,19 @@ import {
   createEmptyTabAssets,
   fileNameWithoutExt,
   revokeAssetUrls,
+  toSlicePreviewAsset,
   type ProcessTab,
   type SlicePreviewItem,
 } from './process/processDomain'
+
+type SliceSubTab = 'split' | 'multi_size'
 
 export function ProcessPage() {
   const [lineTool, setLineTool] = useState<'x' | 'y'>('x')
   const [detecting, setDetecting] = useState(false)
   const [draggingLine, setDraggingLine] = useState<{ axis: 'x' | 'y'; line: number } | null>(null)
   const [activeTab, setActiveTab] = useState<ProcessTab>('slice')
+  const [sliceSubTab, setSliceSubTab] = useState<SliceSubTab>('split')
   const [selectedAssetsByTab, setSelectedAssetsByTab] = useState<Record<ProcessTab, string | null>>({
     slice: null,
     matting: null,
@@ -39,6 +44,8 @@ export function ProcessPage() {
   const [slicePreviewVisible, setSlicePreviewVisible] = useState(true)
   const [slicePreviewItems, setSlicePreviewItems] = useState<SlicePreviewItem[]>([])
   const [slicePreviewStatus, setSlicePreviewStatus] = useState('')
+  const [resizePreviewAssets, setResizePreviewAssets] = useState<ImageAsset[]>([])
+  const [resizePreviewStatus, setResizePreviewStatus] = useState('')
   const [showImportModal, setShowImportModal] = useState(false)
   const [showInternalImportList, setShowInternalImportList] = useState(false)
   const [showExportModal, setShowExportModal] = useState(false)
@@ -63,6 +70,8 @@ export function ProcessPage() {
 
   const previewImageRef = useRef<HTMLImageElement | null>(null)
   const latestTabAssetsRef = useRef<Record<ProcessTab, ImageAsset[]>>(createEmptyTabAssets())
+  const latestSlicePreviewItemsRef = useRef<SlicePreviewItem[]>([])
+  const latestResizePreviewAssetsRef = useRef<ImageAsset[]>([])
   const tabRefs = useRef<Record<ProcessTab, HTMLButtonElement | null>>({
     slice: null,
     matting: null,
@@ -72,6 +81,8 @@ export function ProcessPage() {
   const {
     sliceConfig,
     setSliceConfig,
+    scaleConfig,
+    setScaleConfig,
     timeline,
     setTimelineFps,
     toggleTimelineLoop,
@@ -193,14 +204,26 @@ export function ProcessPage() {
     }
   }, [sliceAsset, sliceRects])
 
+  const resizePreview = useMemo(() => {
+    if (!sliceAsset) return []
+    return buildScalePreview(sliceAsset.width, sliceAsset.height, scaleConfig)
+  }, [sliceAsset, scaleConfig])
+
+  const sliceResultAssets = useMemo<ImageAsset[]>(() => {
+    if (sliceSubTab === 'split') {
+      return slicePreviewItems.map(toSlicePreviewAsset)
+    }
+    return resizePreviewAssets
+  }, [slicePreviewItems, sliceSubTab, resizePreviewAssets])
+
   const internalImportOptions = useMemo(
-    () => buildInternalImportOptions({ activeTab, tabAssets, slicePreviewItems, mattingResults, timelineAssets }),
-    [activeTab, mattingResults, slicePreviewItems, tabAssets, timelineAssets],
+    () => buildInternalImportOptions({ activeTab, tabAssets, sliceResultAssets, mattingResults, timelineAssets }),
+    [activeTab, mattingResults, sliceResultAssets, tabAssets, timelineAssets],
   )
 
   const processedAssetsForActiveTab = useMemo<ImageAsset[]>(() => {
-    return buildProcessedAssetsForTab({ activeTab, tabAssets, slicePreviewItems, mattingResults, timelineAssets })
-  }, [activeTab, mattingResults, slicePreviewItems, tabAssets, timelineAssets])
+    return buildProcessedAssetsForTab({ activeTab, tabAssets, sliceResultAssets, mattingResults, timelineAssets })
+  }, [activeTab, mattingResults, sliceResultAssets, tabAssets, timelineAssets])
 
   const exportTargets = useMemo(() => {
     if (exportScope === 'selected') {
@@ -237,11 +260,12 @@ export function ProcessPage() {
   }, [selectedSlicePreview, slicePreviewItems])
 
   useEffect(() => {
-    return () => {
-      slicePreviewItems.forEach((item) => URL.revokeObjectURL(item.objectUrl))
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+    latestSlicePreviewItemsRef.current = slicePreviewItems
+  }, [slicePreviewItems])
+
+  useEffect(() => {
+    latestResizePreviewAssetsRef.current = resizePreviewAssets
+  }, [resizePreviewAssets])
 
   useEffect(() => {
     if (activeTab !== 'slice') {
@@ -367,6 +391,10 @@ export function ProcessPage() {
     items.forEach((item) => URL.revokeObjectURL(item.objectUrl))
   }
 
+  const revokeResizePreviewAssets = (assets: ImageAsset[]) => {
+    assets.forEach((asset) => URL.revokeObjectURL(asset.objectUrl))
+  }
+
   const createPreviewSlices = async () => {
     if (!sliceAsset || sliceRects.length === 0) {
       setSlicePreviewStatus('没有可预览的切片')
@@ -412,6 +440,84 @@ export function ProcessPage() {
     setSlicePreviewStatus(`预览已更新：${nextItems.length} 个切片（未保存）`)
   }
 
+  const updateScaleNumber = (key: 'targetWidth' | 'targetHeight', value: string) => {
+    const parsed = Number(value)
+    setScaleConfig((prev) => ({ ...prev, [key]: Number.isFinite(parsed) ? parsed : 1 }))
+  }
+
+  const createResizePreviewAssets = async () => {
+    if (!sliceAsset) {
+      setResizePreviewStatus('请先选择素材')
+      return
+    }
+
+    const validTargets = resizePreview.filter((item) => !item.blocked)
+    if (validTargets.length === 0) {
+      setResizePreviewStatus('没有可生成的低分辨率尺寸')
+      return
+    }
+
+    setResizePreviewStatus(`正在生成 ${validTargets.length} 个低分辨率结果...`)
+
+    const sourceImage = await new Promise<HTMLImageElement>((resolve, reject) => {
+      const img = new Image()
+      img.onload = () => resolve(img)
+      img.onerror = () => reject(new Error('RESIZE_IMAGE_LOAD_FAILED'))
+      img.src = sliceAsset.objectUrl
+    })
+
+    const base = fileNameWithoutExt(sliceAsset.name)
+    const nextAssets: ImageAsset[] = []
+
+    for (const target of validTargets) {
+      const canvas = document.createElement('canvas')
+      canvas.width = target.width
+      canvas.height = target.height
+      const ctx = canvas.getContext('2d')
+      if (!ctx) continue
+      ctx.imageSmoothingEnabled = true
+      ctx.imageSmoothingQuality = 'high'
+      ctx.drawImage(sourceImage, 0, 0, target.width, target.height)
+      const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/png'))
+      if (!blob) continue
+
+      const name = `${base}_${target.width}x${target.height}.png`
+      const file = new File([blob], name, { type: blob.type || 'image/png' })
+      nextAssets.push({
+        id: `${sliceAsset.id}-resize-${target.width}x${target.height}`,
+        name,
+        format: 'png',
+        width: target.width,
+        height: target.height,
+        size: blob.size,
+        objectUrl: URL.createObjectURL(blob),
+        file,
+      })
+    }
+
+    setResizePreviewAssets((prev) => {
+      revokeResizePreviewAssets(prev)
+      return nextAssets
+    })
+    setResizePreviewStatus(`低分辨率结果已更新：${nextAssets.length} 张（未保存）`)
+  }
+
+  const resetResizeConfig = () => {
+    setScaleConfig((prev) => ({
+      ...prev,
+      mode: 'ratio',
+      ratiosText: '1,0.5,0.25',
+      targetWidth: 1024,
+      targetHeight: 1024,
+      keepAspect: true,
+    }))
+    setResizePreviewStatus('低分辨率参数已重置')
+    setResizePreviewAssets((prev) => {
+      revokeResizePreviewAssets(prev)
+      return []
+    })
+  }
+
   const resetSliceConfig = () => {
     setSliceConfig(() => ({ ...DEFAULT_SLICE_CONFIG }))
     setLineTool('x')
@@ -423,6 +529,13 @@ export function ProcessPage() {
       return []
     })
   }
+
+  useEffect(() => {
+    return () => {
+      revokeSlicePreviewItems(latestSlicePreviewItemsRef.current)
+      revokeResizePreviewAssets(latestResizePreviewAssetsRef.current)
+    }
+  }, [])
 
   const handleImport = async (event: ChangeEvent<HTMLInputElement>) => {
     const files = event.target.files
@@ -562,142 +675,235 @@ export function ProcessPage() {
       </div>
 
       {activeTab === 'slice' && (
-        <div className="split-grid" role="tabpanel" aria-label="切分标签内容">
-          <div className="panel">
-            <h3>切分参数</h3>
-            <div className="field-grid">
-              <label>切分模式</label>
-              <select className="input" value={sliceConfig.mode} onChange={(e) => setSliceConfig((prev) => ({ ...prev, mode: e.target.value as 'fixed_size' | 'fixed_count' | 'line_detect' }))}>
-                <option value="fixed_size">指定单片尺寸</option>
-                <option value="fixed_count">指定横竖数量</option>
-                <option value="line_detect">自动/手动切分线</option>
-              </select>
-
-              {sliceConfig.mode === 'fixed_size' ? (
-                <>
-                  <label>slice_width</label>
-                  <input className="input" type="number" min={1} value={sliceConfig.sliceWidth} onChange={(e) => updateNumber('sliceWidth', e.target.value)} />
-                  <label>slice_height</label>
-                  <input className="input" type="number" min={1} value={sliceConfig.sliceHeight} onChange={(e) => updateNumber('sliceHeight', e.target.value)} />
-                </>
-              ) : sliceConfig.mode === 'fixed_count' ? (
-                <>
-                  <label>count_x</label>
-                  <input className="input" type="number" min={1} value={sliceConfig.countX} onChange={(e) => updateNumber('countX', e.target.value)} />
-                  <label>count_y</label>
-                  <input className="input" type="number" min={1} value={sliceConfig.countY} onChange={(e) => updateNumber('countY', e.target.value)} />
-                </>
-              ) : (
-                <>
-                  <label>自动识别线条</label>
-                  <button type="button" className="btn" onClick={handleAutoDetectLines} disabled={detecting || !sliceAsset}>
-                    {detecting ? '识别中...' : '边缘检测 + 投影峰值'}
-                  </button>
-                  <label>手动加线方向</label>
-                  <div className="action-row">
-                    <button type="button" className={lineTool === 'x' ? 'btn' : 'btn ghost'} onClick={() => setLineTool('x')}>竖线（X）</button>
-                    <button type="button" className={lineTool === 'y' ? 'btn' : 'btn ghost'} onClick={() => setLineTool('y')}>横线（Y）</button>
-                  </div>
-                  <label>线条数量</label>
-                  <div className="hint">X: {sliceConfig.linesX.length} 条，Y: {sliceConfig.linesY.length} 条</div>
-                </>
-              )}
-
-              <label>offset_x</label>
-              <input className="input" type="number" min={0} value={sliceConfig.offsetX} onChange={(e) => updateNumber('offsetX', e.target.value)} />
-              <label>offset_y</label>
-              <input className="input" type="number" min={0} value={sliceConfig.offsetY} onChange={(e) => updateNumber('offsetY', e.target.value)} />
+        <div role="tabpanel" aria-label="切分标签内容">
+          <div className="panel" style={{ marginBottom: 12 }}>
+            <div className="action-row" style={{ margin: 0 }}>
+              <button type="button" className={sliceSubTab === 'split' ? 'btn' : 'btn ghost'} onClick={() => setSliceSubTab('split')}>切成多个</button>
+              <button type="button" className={sliceSubTab === 'multi_size' ? 'btn' : 'btn ghost'} onClick={() => setSliceSubTab('multi_size')}>多尺寸低分图</button>
             </div>
           </div>
 
-          <div className="panel">
-            <div className="preview-header-row">
-              <h3>切分预览</h3>
-              <div className="action-row" style={{ margin: 0 }}>
-                <button type="button" className="btn" onClick={createPreviewSlices} disabled={!sliceAsset}>预览</button>
-                <button type="button" className="btn ghost" onClick={resetSliceConfig}>重置</button>
-              </div>
-            </div>
+          {sliceSubTab === 'split' && (
+            <div className="split-grid">
+              <div className="panel">
+                <h3>切分参数</h3>
+                <div className="field-grid">
+                  <label>切分模式</label>
+                  <select className="input" value={sliceConfig.mode} onChange={(e) => setSliceConfig((prev) => ({ ...prev, mode: e.target.value as 'fixed_size' | 'fixed_count' | 'line_detect' }))}>
+                    <option value="fixed_size">指定单片尺寸</option>
+                    <option value="fixed_count">指定横竖数量</option>
+                    <option value="line_detect">自动/手动切分线</option>
+                  </select>
 
-            {!sliceAsset ? (
-              <div className="empty">请先导入素材。</div>
-            ) : !slicePreviewVisible ? (
-              <div className="empty">切分预览已隐藏。</div>
-            ) : (
-              <>
-                <div className="preview-wrap">
-                  <div
-                    className={sliceConfig.mode === 'line_detect' ? 'preview-stage line-mode' : 'preview-stage'}
-                    onClick={addManualLine}
-                    onMouseMove={updateDraggedLine}
-                    onMouseUp={() => setDraggingLine(null)}
-                    onMouseLeave={() => setDraggingLine(null)}
-                    style={previewRenderSize.width > 0 && previewRenderSize.height > 0 ? { width: previewRenderSize.width, height: previewRenderSize.height } : undefined}
-                  >
-                    <img
-                      ref={previewImageRef}
-                      src={sliceAsset.objectUrl}
-                      alt={sliceAsset.name}
-                      className="preview-img"
-                      onLoad={(event) => {
-                        setPreviewRenderSize({ width: event.currentTarget.clientWidth, height: event.currentTarget.clientHeight })
-                      }}
-                    />
-                    {sliceConfig.mode !== 'line_detect' && (
-                      <>
-                        {sliceOverlayLines.x.map((x) => <div key={`sx-${x}`} className="slice-guide-line x" style={{ left: resolveOverlayX(x) }} />)}
-                        {sliceOverlayLines.y.map((y) => <div key={`sy-${y}`} className="slice-guide-line y" style={{ top: resolveOverlayY(y) }} />)}
-                      </>
-                    )}
-                    {sliceConfig.mode === 'line_detect' && (
-                      <>
-                        {sliceConfig.linesX.map((x) => (
-                          <div key={`x-${x}`} className="manual-line x" style={{ left: resolveOverlayX(x) }} onMouseDown={(event) => {
-                            event.stopPropagation(); setDraggingLine({ axis: 'x', line: x })
-                          }} />
-                        ))}
-                        {sliceConfig.linesY.map((y) => (
-                          <div key={`y-${y}`} className="manual-line y" style={{ top: resolveOverlayY(y) }} onMouseDown={(event) => {
-                            event.stopPropagation(); setDraggingLine({ axis: 'y', line: y })
-                          }} />
-                        ))}
-                      </>
-                    )}
+                  {sliceConfig.mode === 'fixed_size' ? (
+                    <>
+                      <label>slice_width</label>
+                      <input className="input" type="number" min={1} value={sliceConfig.sliceWidth} onChange={(e) => updateNumber('sliceWidth', e.target.value)} />
+                      <label>slice_height</label>
+                      <input className="input" type="number" min={1} value={sliceConfig.sliceHeight} onChange={(e) => updateNumber('sliceHeight', e.target.value)} />
+                    </>
+                  ) : sliceConfig.mode === 'fixed_count' ? (
+                    <>
+                      <label>count_x</label>
+                      <input className="input" type="number" min={1} value={sliceConfig.countX} onChange={(e) => updateNumber('countX', e.target.value)} />
+                      <label>count_y</label>
+                      <input className="input" type="number" min={1} value={sliceConfig.countY} onChange={(e) => updateNumber('countY', e.target.value)} />
+                    </>
+                  ) : (
+                    <>
+                      <label>自动识别线条</label>
+                      <button type="button" className="btn" onClick={handleAutoDetectLines} disabled={detecting || !sliceAsset}>
+                        {detecting ? '识别中...' : '边缘检测 + 投影峰值'}
+                      </button>
+                      <label>手动加线方向</label>
+                      <div className="action-row">
+                        <button type="button" className={lineTool === 'x' ? 'btn' : 'btn ghost'} onClick={() => setLineTool('x')}>竖线（X）</button>
+                        <button type="button" className={lineTool === 'y' ? 'btn' : 'btn ghost'} onClick={() => setLineTool('y')}>横线（Y）</button>
+                      </div>
+                      <label>线条数量</label>
+                      <div className="hint">X: {sliceConfig.linesX.length} 条，Y: {sliceConfig.linesY.length} 条</div>
+                    </>
+                  )}
+
+                  <label>offset_x</label>
+                  <input className="input" type="number" min={0} value={sliceConfig.offsetX} onChange={(e) => updateNumber('offsetX', e.target.value)} />
+                  <label>offset_y</label>
+                  <input className="input" type="number" min={0} value={sliceConfig.offsetY} onChange={(e) => updateNumber('offsetY', e.target.value)} />
+                </div>
+              </div>
+
+              <div className="panel">
+                <div className="preview-header-row">
+                  <h3>切分预览</h3>
+                  <div className="action-row" style={{ margin: 0 }}>
+                    <button type="button" className="btn" onClick={createPreviewSlices} disabled={!sliceAsset}>预览</button>
+                    <button type="button" className="btn ghost" onClick={resetSliceConfig}>重置</button>
                   </div>
                 </div>
 
-                <div className="hint" style={{ marginTop: 8 }}>{slicePreviewStatus}</div>
-
-                {slicePreviewItems.length > 0 && (
-                  <div className="slice-list">
-                    <HorizontalImageScroller
-                      title="切片坐标预览"
-                      items={slicePreviewScrollerItems}
-                      selectedId={selectedSlicePreview?.id ?? null}
-                      onSelect={(id) => {
-                        const target = slicePreviewItems.find((item) => item.id === id)
-                        if (target) setSelectedSlicePreview(target)
-                      }}
-                      onZoom={(id) => {
-                        const target = slicePreviewItems.find((item) => item.id === id)
-                        if (target) setSelectedSlicePreview(target)
-                      }}
-                    />
-                  </div>
-                )}
-
-                {sliceConfig.mode === 'line_detect' && (
-                  <div className="slice-list">
-                    <h4>手动线条管理（点击删除）</h4>
-                    <div className="line-badges">
-                      {sliceConfig.linesX.map((line) => <button key={`bx-${line}`} type="button" className="line-badge" onClick={() => removeLine('x', line)}>X:{line} ×</button>)}
-                      {sliceConfig.linesY.map((line) => <button key={`by-${line}`} type="button" className="line-badge" onClick={() => removeLine('y', line)}>Y:{line} ×</button>)}
+                {!sliceAsset ? (
+                  <div className="empty">请先导入素材。</div>
+                ) : !slicePreviewVisible ? (
+                  <div className="empty">切分预览已隐藏。</div>
+                ) : (
+                  <>
+                    <div className="preview-wrap">
+                      <div
+                        className={sliceConfig.mode === 'line_detect' ? 'preview-stage line-mode' : 'preview-stage'}
+                        onClick={addManualLine}
+                        onMouseMove={updateDraggedLine}
+                        onMouseUp={() => setDraggingLine(null)}
+                        onMouseLeave={() => setDraggingLine(null)}
+                        style={previewRenderSize.width > 0 && previewRenderSize.height > 0 ? { width: previewRenderSize.width, height: previewRenderSize.height } : undefined}
+                      >
+                        <img
+                          ref={previewImageRef}
+                          src={sliceAsset.objectUrl}
+                          alt={sliceAsset.name}
+                          className="preview-img"
+                          onLoad={(event) => {
+                            setPreviewRenderSize({ width: event.currentTarget.clientWidth, height: event.currentTarget.clientHeight })
+                          }}
+                        />
+                        {sliceConfig.mode !== 'line_detect' && (
+                          <>
+                            {sliceOverlayLines.x.map((x) => <div key={`sx-${x}`} className="slice-guide-line x" style={{ left: resolveOverlayX(x) }} />)}
+                            {sliceOverlayLines.y.map((y) => <div key={`sy-${y}`} className="slice-guide-line y" style={{ top: resolveOverlayY(y) }} />)}
+                          </>
+                        )}
+                        {sliceConfig.mode === 'line_detect' && (
+                          <>
+                            {sliceConfig.linesX.map((x) => (
+                              <div key={`x-${x}`} className="manual-line x" style={{ left: resolveOverlayX(x) }} onMouseDown={(event) => {
+                                event.stopPropagation(); setDraggingLine({ axis: 'x', line: x })
+                              }} />
+                            ))}
+                            {sliceConfig.linesY.map((y) => (
+                              <div key={`y-${y}`} className="manual-line y" style={{ top: resolveOverlayY(y) }} onMouseDown={(event) => {
+                                event.stopPropagation(); setDraggingLine({ axis: 'y', line: y })
+                              }} />
+                            ))}
+                          </>
+                        )}
+                      </div>
                     </div>
-                  </div>
+
+                    <div className="hint" style={{ marginTop: 8 }}>{slicePreviewStatus}</div>
+
+                    {slicePreviewItems.length > 0 && (
+                      <div className="slice-list">
+                        <HorizontalImageScroller
+                          title="切片坐标预览"
+                          items={slicePreviewScrollerItems}
+                          selectedId={selectedSlicePreview?.id ?? null}
+                          onSelect={(id) => {
+                            const target = slicePreviewItems.find((item) => item.id === id)
+                            if (target) setSelectedSlicePreview(target)
+                          }}
+                          onZoom={(id) => {
+                            const target = slicePreviewItems.find((item) => item.id === id)
+                            if (target) setSelectedSlicePreview(target)
+                          }}
+                        />
+                      </div>
+                    )}
+
+                    {sliceConfig.mode === 'line_detect' && (
+                      <div className="slice-list">
+                        <h4>手动线条管理（点击删除）</h4>
+                        <div className="line-badges">
+                          {sliceConfig.linesX.map((line) => <button key={`bx-${line}`} type="button" className="line-badge" onClick={() => removeLine('x', line)}>X:{line} ×</button>)}
+                          {sliceConfig.linesY.map((line) => <button key={`by-${line}`} type="button" className="line-badge" onClick={() => removeLine('y', line)}>Y:{line} ×</button>)}
+                        </div>
+                      </div>
+                    )}
+                  </>
                 )}
-              </>
-            )}
-          </div>
+              </div>
+            </div>
+          )}
+
+          {sliceSubTab === 'multi_size' && (
+            <div className="split-grid">
+              <div className="panel">
+                <h3>低分辨率参数</h3>
+                <div className="field-grid two-col">
+                  <label>缩放模式</label>
+                  <select className="input" value={scaleConfig.mode} onChange={(e) => setScaleConfig((prev) => ({ ...prev, mode: e.target.value as 'ratio' | 'target' }))}>
+                    <option value="ratio">按比例</option>
+                    <option value="target">按目标分辨率</option>
+                  </select>
+                  {scaleConfig.mode === 'ratio' ? (
+                    <>
+                      <label>比例列表（逗号分隔）</label>
+                      <input className="input" value={scaleConfig.ratiosText} onChange={(e) => setScaleConfig((prev) => ({ ...prev, ratiosText: e.target.value }))} />
+                    </>
+                  ) : (
+                    <>
+                      <label>target_width</label>
+                      <input className="input" type="number" min={1} value={scaleConfig.targetWidth} onChange={(e) => updateScaleNumber('targetWidth', e.target.value)} />
+                      <label>target_height</label>
+                      <input className="input" type="number" min={1} value={scaleConfig.targetHeight} onChange={(e) => updateScaleNumber('targetHeight', e.target.value)} />
+                    </>
+                  )}
+                </div>
+                <div className="hint" style={{ marginTop: 10 }}>该功能用于将高分辨率素材生成多张不同尺寸的低分辨率图片。</div>
+              </div>
+
+              <div className="panel">
+                <div className="preview-header-row">
+                  <h3>低分辨率结果</h3>
+                  <div className="action-row" style={{ margin: 0 }}>
+                    <button type="button" className="btn" onClick={createResizePreviewAssets} disabled={!sliceAsset}>预览</button>
+                    <button type="button" className="btn ghost" onClick={resetResizeConfig}>重置</button>
+                  </div>
+                </div>
+
+                {!sliceAsset ? (
+                  <div className="empty">请先导入素材。</div>
+                ) : (
+                  <>
+                    <div className="line-badges" style={{ marginTop: 10 }}>
+                      {resizePreview.length === 0 && <span className="hint">请输入有效比例或目标分辨率。</span>}
+                      {resizePreview.map((item) => (
+                        <span key={`${item.label}-${item.width}-${item.height}`} className="line-badge">
+                          {item.label} → {item.width}×{item.height} {item.blocked ? '(禁止放大)' : ''}
+                        </span>
+                      ))}
+                    </div>
+
+                    <div className="hint" style={{ marginTop: 8 }}>{resizePreviewStatus}</div>
+
+                    {resizePreviewAssets.length > 0 && (
+                      <div className="slice-list">
+                        <HorizontalImageScroller
+                          title="低分辨率结果预览"
+                          items={resizePreviewAssets.map((item) => ({
+                            id: item.id,
+                            imageUrl: item.objectUrl,
+                            title: item.name,
+                            metaLines: [`${item.width}×${item.height}`, `${item.format.toUpperCase()}`],
+                          }))}
+                          selectedId={selectedExportPreviewId}
+                          onSelect={(id) => setSelectedExportPreviewId(id)}
+                          onZoom={(id) => {
+                            const target = resizePreviewAssets.find((item) => item.id === id)
+                            if (target) {
+                              setExportPreviewLightbox({
+                                imageUrl: target.objectUrl,
+                                title: target.name,
+                                meta: `${target.width}×${target.height} · ${target.format.toUpperCase()}`,
+                              })
+                            }
+                          }}
+                        />
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+            </div>
+          )}
         </div>
       )}
 
