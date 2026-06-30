@@ -53,6 +53,11 @@ interface BorderTrim {
   left: number
 }
 
+interface ContentAnchor {
+  x: number
+  y: number
+}
+
 function mergeBorderTrim(
   autoTrim: BorderTrim | null,
   manualTop: number,
@@ -247,6 +252,64 @@ function inTrimBorder(x: number, y: number, width: number, height: number, trim:
   return false
 }
 
+function detectContentAnchor(
+  pixels: Uint8ClampedArray,
+  width: number,
+  height: number,
+  alphaThreshold: number,
+): ContentAnchor | null {
+  const threshold = clamp(Math.floor(alphaThreshold), 0, 254)
+
+  let minX = width
+  let minY = height
+  let maxX = -1
+  let maxY = -1
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const idx = (y * width + x) * 4
+      if (pixels[idx + 3] <= threshold) continue
+      if (x < minX) minX = x
+      if (y < minY) minY = y
+      if (x > maxX) maxX = x
+      if (y > maxY) maxY = y
+    }
+  }
+
+  if (maxX < minX || maxY < minY) return null
+  return {
+    x: (minX + maxX) / 2,
+    y: (minY + maxY) / 2,
+  }
+}
+
+function translateFrame(
+  frame: ImageData,
+  width: number,
+  height: number,
+  dx: number,
+  dy: number,
+) {
+  if (dx === 0 && dy === 0) return
+
+  const src = new Uint8ClampedArray(frame.data)
+  frame.data.fill(0)
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const sx = x - dx
+      const sy = y - dy
+      if (sx < 0 || sy < 0 || sx >= width || sy >= height) continue
+      const sIdx = (sy * width + sx) * 4
+      const dIdx = (y * width + x) * 4
+      frame.data[dIdx] = src[sIdx]
+      frame.data[dIdx + 1] = src[sIdx + 1]
+      frame.data[dIdx + 2] = src[sIdx + 2]
+      frame.data[dIdx + 3] = src[sIdx + 3]
+    }
+  }
+}
+
 async function loadImageFrame(asset: ImageAsset) {
   const image = await new Promise<HTMLImageElement>((resolve, reject) => {
     const img = new Image()
@@ -362,6 +425,36 @@ async function processBackgroundStage(asset: ImageAsset, config: MattingConfig):
 async function processBorderStage(asset: ImageAsset, config: MattingConfig): Promise<MattingResult> {
   const { canvas, ctx, frame, pixels } = await loadImageFrame(asset)
   const warning = applyBorderTrimToFrame(pixels, canvas.width, canvas.height, config)
+  const result = await finalizeMattingOutput(canvas, ctx, frame, warning)
+  return {
+    ...result,
+    assetId: asset.id,
+    algorithm: config.algorithm,
+  }
+}
+
+async function processMoveStage(
+  asset: ImageAsset,
+  config: MattingConfig,
+  targetAnchor?: ContentAnchor,
+): Promise<MattingResult> {
+  const { canvas, ctx, frame, pixels } = await loadImageFrame(asset)
+  const detected = detectContentAnchor(pixels, canvas.width, canvas.height, config.moveAlphaThreshold)
+
+  let warning: string | undefined
+  if (!detected) {
+    warning = '移动居中：未检测到前景（可能为全透明或阈值过高）'
+  } else {
+    const target = targetAnchor ?? {
+      x: (canvas.width - 1) / 2,
+      y: (canvas.height - 1) / 2,
+    }
+    const dx = Math.round(target.x - detected.x)
+    const dy = Math.round(target.y - detected.y)
+    translateFrame(frame, canvas.width, canvas.height, dx, dy)
+    warning = `移动居中：dx=${dx} dy=${dy}`
+  }
+
   const result = await finalizeMattingOutput(canvas, ctx, frame, warning)
   return {
     ...result,
@@ -500,4 +593,17 @@ export async function runMattingBackground(asset: ImageAsset, config: MattingCon
 
 export async function runMattingBorder(asset: ImageAsset, config: MattingConfig): Promise<MattingResult> {
   return processBorderStage(asset, config)
+}
+
+export async function detectMattingAnchor(asset: ImageAsset, config: MattingConfig): Promise<ContentAnchor | null> {
+  const { canvas, pixels } = await loadImageFrame(asset)
+  return detectContentAnchor(pixels, canvas.width, canvas.height, config.moveAlphaThreshold)
+}
+
+export async function runMattingMove(
+  asset: ImageAsset,
+  config: MattingConfig,
+  targetAnchor?: ContentAnchor,
+): Promise<MattingResult> {
+  return processMoveStage(asset, config, targetAnchor)
 }

@@ -1,7 +1,7 @@
 import type { ImageAsset } from '../../../types/image'
 import type { MattingResult } from '../../../types/matting'
 
-export type ProcessTab = 'slice' | 'scale' | 'matting' | 'timeline'
+export type ProcessTab = 'slice' | 'matting' | 'timeline'
 
 export interface SlicePreviewItem {
   id: string
@@ -19,11 +19,10 @@ export interface InternalImportOption {
   assets: ImageAsset[]
 }
 
-export const TAB_ORDER: ProcessTab[] = ['slice', 'scale', 'matting', 'timeline']
+export const TAB_ORDER: ProcessTab[] = ['slice', 'matting', 'timeline']
 
 export const TAB_LABELS: Record<ProcessTab, string> = {
   slice: '切分',
-  scale: '缩放',
   matting: '调整图片',
   timeline: '动画',
 }
@@ -31,7 +30,6 @@ export const TAB_LABELS: Record<ProcessTab, string> = {
 export function createEmptyTabAssets(): Record<ProcessTab, ImageAsset[]> {
   return {
     slice: [],
-    scale: [],
     matting: [],
     timeline: [],
   }
@@ -151,5 +149,5 @@ export function buildProcessedAssetsForTab(input: BuildProcessedAssetsForTabInpu
     return input.timelineAssets
   }
 
-  return input.tabAssets.scale
+  return []
 }

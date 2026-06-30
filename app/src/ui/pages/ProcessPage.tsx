@@ -7,7 +7,6 @@ import type { ImageAsset } from '../../types/image'
 import { exportAssetsByRule, triggerDownloads, type ExportFormat } from '../../utils/exportUtils'
 import { generateSliceRects } from '../../utils/sliceGrid'
 import { detectSplitLinesFromUrl } from '../../utils/lineDetect'
-import { buildScalePreview } from '../../utils/scalePreview'
 import { ProcessActionCard } from '../components/ProcessActionCard'
 import { HorizontalImageScroller, type HorizontalImageScrollerItem } from '../components/HorizontalImageScroller'
 import { ProcessImportModal } from './process/components/ProcessImportModal'
@@ -34,7 +33,6 @@ export function ProcessPage() {
   const [activeTab, setActiveTab] = useState<ProcessTab>('slice')
   const [selectedAssetsByTab, setSelectedAssetsByTab] = useState<Record<ProcessTab, string | null>>({
     slice: null,
-    scale: null,
     matting: null,
     timeline: null,
   })
@@ -67,7 +65,6 @@ export function ProcessPage() {
   const latestTabAssetsRef = useRef<Record<ProcessTab, ImageAsset[]>>(createEmptyTabAssets())
   const tabRefs = useRef<Record<ProcessTab, HTMLButtonElement | null>>({
     slice: null,
-    scale: null,
     matting: null,
     timeline: null,
   })
@@ -75,8 +72,6 @@ export function ProcessPage() {
   const {
     sliceConfig,
     setSliceConfig,
-    scaleConfig,
-    setScaleConfig,
     timeline,
     setTimelineFps,
     toggleTimelineLoop,
@@ -85,7 +80,7 @@ export function ProcessPage() {
   useEffect(() => {
     const hasAnyAssets = TAB_ORDER.some((tab) => tabAssets[tab].length > 0)
     if (!hasAnyAssets) {
-      setSelectedAssetsByTab({ slice: null, scale: null, matting: null, timeline: null })
+      setSelectedAssetsByTab({ slice: null, matting: null, timeline: null })
       return
     }
 
@@ -116,7 +111,6 @@ export function ProcessPage() {
   }
 
   const sliceAsset = getAssetByTab('slice')
-  const scaleAsset = getAssetByTab('scale')
   const mattingAsset = getAssetByTab('matting')
   const activeTabAssets = tabAssets[activeTab]
 
@@ -131,12 +125,16 @@ export function ProcessPage() {
     updateMattingNumber,
     updateMattingTrim,
     setBorderMode,
+    setMoveBatchStrategy,
+    setMoveAlphaThreshold,
     resetMattingForCurrent,
     resetMattingForAll,
     applyBackgroundToActive,
     applyBackgroundToBatch,
     applyBorderToActive,
     applyBorderToBatch,
+    applyMoveToActive,
+    applyMoveToBatch,
   } = useMattingWorkflow({
     mattingAssets: tabAssets.matting,
     mattingAsset,
@@ -194,11 +192,6 @@ export function ProcessPage() {
       y: Array.from(ySet).filter((y) => y > 0 && y < sliceAsset.height).sort((a, b) => a - b),
     }
   }, [sliceAsset, sliceRects])
-
-  const scalePreview = useMemo(() => {
-    if (!scaleAsset) return []
-    return buildScalePreview(scaleAsset.width, scaleAsset.height, scaleConfig)
-  }, [scaleAsset, scaleConfig])
 
   const internalImportOptions = useMemo(
     () => buildInternalImportOptions({ activeTab, tabAssets, slicePreviewItems, mattingResults, timelineAssets }),
@@ -368,11 +361,6 @@ export function ProcessPage() {
       return { ...prev, linesY }
     })
     setDraggingLine((prev) => (prev ? { ...prev, line: draggingLine.axis === 'x' ? x : y } : null))
-  }
-
-  const updateScaleNumber = (key: 'targetWidth' | 'targetHeight', value: string) => {
-    const parsed = Number(value)
-    setScaleConfig((prev) => ({ ...prev, [key]: Number.isFinite(parsed) ? parsed : 1 }))
   }
 
   const revokeSlicePreviewItems = (items: SlicePreviewItem[]) => {
@@ -713,41 +701,6 @@ export function ProcessPage() {
         </div>
       )}
 
-      {activeTab === 'scale' && (
-        <div className="panel" role="tabpanel" aria-label="缩放标签内容">
-          <h3>缩放预览（仅缩小）</h3>
-          <div className="field-grid two-col">
-            <label>缩放模式</label>
-            <select className="input" value={scaleConfig.mode} onChange={(e) => setScaleConfig((prev) => ({ ...prev, mode: e.target.value as 'ratio' | 'target' }))}>
-              <option value="ratio">按比例</option>
-              <option value="target">按目标分辨率</option>
-            </select>
-            {scaleConfig.mode === 'ratio' ? (
-              <>
-                <label>比例列表（逗号分隔）</label>
-                <input className="input" value={scaleConfig.ratiosText} onChange={(e) => setScaleConfig((prev) => ({ ...prev, ratiosText: e.target.value }))} />
-              </>
-            ) : (
-              <>
-                <label>target_width</label>
-                <input className="input" type="number" min={1} value={scaleConfig.targetWidth} onChange={(e) => updateScaleNumber('targetWidth', e.target.value)} />
-                <label>target_height</label>
-                <input className="input" type="number" min={1} value={scaleConfig.targetHeight} onChange={(e) => updateScaleNumber('targetHeight', e.target.value)} />
-              </>
-            )}
-          </div>
-          <div className="hint">放大会被标记为禁止（downscale only）。</div>
-          <div className="line-badges" style={{ marginTop: 10 }}>
-            {scalePreview.length === 0 && <span className="hint">请先选择素材。</span>}
-            {scalePreview.map((item) => (
-              <span key={`${item.label}-${item.width}-${item.height}`} className={item.blocked ? 'scale-chip blocked' : 'scale-chip'}>
-                {item.label} → {item.width}×{item.height} {item.blocked ? '(禁止放大)' : ''}
-              </span>
-            ))}
-          </div>
-        </div>
-      )}
-
       {activeTab === 'matting' && (
         <div className="panel matting-panel" style={{ marginTop: 14 }} role="tabpanel" aria-label="调整图片标签内容">
           <div className="panel matting-preview-panel">
@@ -859,6 +812,41 @@ export function ProcessPage() {
                         disabled={mattingConfig.removeOuterBorder}
                       />
                     </label>
+                  </div>
+                </div>
+              )}
+            />
+
+            <ProcessActionCard
+              title="移动"
+              density="compact"
+              actions={(
+                <>
+                  <button type="button" className="btn" onClick={applyMoveToActive} disabled={!mattingAsset || mattingProcessing}>应用</button>
+                  <button type="button" className="btn ghost" onClick={applyMoveToBatch} disabled={tabAssets.matting.length === 0 || mattingProcessing}>批量</button>
+                </>
+              )}
+              config={(
+                <div className="border-mode-config">
+                  <div className="field-grid two-col" style={{ margin: 0 }}>
+                    <label>批量策略</label>
+                    <select
+                      className="input"
+                      value={mattingConfig.moveBatchStrategy}
+                      onChange={(e) => setMoveBatchStrategy(e.target.value as MattingConfig['moveBatchStrategy'])}
+                    >
+                      <option value="canvas_center">画布中心（V1）</option>
+                      <option value="median_anchor">中位锚点（V1.5）</option>
+                    </select>
+                    <label>前景阈值(alpha)</label>
+                    <input
+                      className="input"
+                      type="number"
+                      min={0}
+                      max={254}
+                      value={mattingConfig.moveAlphaThreshold}
+                      onChange={(e) => setMoveAlphaThreshold(e.target.value)}
+                    />
                   </div>
                 </div>
               )}

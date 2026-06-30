@@ -1,5 +1,6 @@
 export type MattingAlgorithm = 'ai_general' | 'chroma_key' | 'checkerboard'
 export type EdgePreference = 'keep_detail' | 'clean_edge'
+export type MoveBatchStrategy = 'canvas_center' | 'median_anchor'
 
 export interface MattingConfig {
   algorithm: MattingAlgorithm
@@ -13,6 +14,8 @@ export interface MattingConfig {
   trimBorderRight: number
   trimBorderBottom: number
   trimBorderLeft: number
+  moveBatchStrategy: MoveBatchStrategy
+  moveAlphaThreshold: number
   bgColorHex: string
   modelPath: string
 }
@@ -36,6 +39,8 @@ export const DEFAULT_MATTING_CONFIG: MattingConfig = {
   trimBorderRight: 0,
   trimBorderBottom: 0,
   trimBorderLeft: 0,
+  moveBatchStrategy: 'canvas_center',
+  moveAlphaThreshold: 12,
   bgColorHex: '#ffffff',
   modelPath: '/models/u2net.onnx',
 }
