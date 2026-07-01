@@ -24,10 +24,11 @@ function App() {
       <BrowserRouter>
         <Routes>
           <Route element={<AppLayout />}>
-            <Route path="/" element={<ImportPage />} />
+            <Route path="/" element={<ProcessPage />} />
+            <Route path="/import" element={<ImportPage />} />
             <Route path="/process" element={<ProcessPage />} />
             <Route path="/export" element={<ExportPage />} />
-            <Route path="*" element={<Navigate to="/" replace />} />
+            <Route path="*" element={<Navigate to="/process" replace />} />
           </Route>
         </Routes>
       </BrowserRouter>

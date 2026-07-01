@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent, type KeyboardEvent } from 'react'
 import { importImageFiles } from '../../core/services/imageImportService'
 import { useWorkspace } from '../../core/state/useWorkspace'
+import { executeV2Export } from '../../core/export-v2/orchestrator'
+import type { ExportTaskSpec } from '../../core/export-v2/types'
+import { validateV2TaskSpec } from '../../core/export-v2/validation'
 import { type MattingConfig } from '../../types/matting'
 import { DEFAULT_SLICE_CONFIG } from '../../types/slice'
 import type { ImageAsset } from '../../types/image'
@@ -29,6 +32,8 @@ import {
 } from './process/processDomain'
 
 type SliceSubTab = 'split' | 'multi_size'
+type ExportInteractionMode = 'classic' | 'v2'
+type V2ExportTemplate = 'atlas' | 'animation' | 'ui_slice' | 'godot_package'
 
 export function ProcessPage() {
   const [lineTool, setLineTool] = useState<'x' | 'y'>('x')
@@ -49,6 +54,8 @@ export function ProcessPage() {
   const [showImportModal, setShowImportModal] = useState(false)
   const [showInternalImportList, setShowInternalImportList] = useState(false)
   const [showExportModal, setShowExportModal] = useState(false)
+  const [exportInteractionMode, setExportInteractionMode] = useState<ExportInteractionMode>('v2')
+  const [v2ExportTemplate, setV2ExportTemplate] = useState<V2ExportTemplate>('atlas')
   const [prefix, setPrefix] = useState('asset')
   const [prefixTouched, setPrefixTouched] = useState(false)
   const [startIndex, setStartIndex] = useState(1)
@@ -57,6 +64,30 @@ export function ProcessPage() {
   const [format, setFormat] = useState<ExportFormat>('PNG')
   const [exportScope, setExportScope] = useState<'all' | 'selected'>('all')
   const [exportStatus, setExportStatus] = useState('')
+  const [v2ProfileName, setV2ProfileName] = useState('godot_v2_profile')
+  const [v2OutputFolder, setV2OutputFolder] = useState('exports/godot')
+  const [v2AtlasAutoSize, setV2AtlasAutoSize] = useState(true)
+  const [v2AtlasMaxSize, setV2AtlasMaxSize] = useState(2048)
+  const [v2AtlasPadding, setV2AtlasPadding] = useState(2)
+  const [v2AtlasExtrude, setV2AtlasExtrude] = useState(1)
+  const [v2AtlasPolicy, setV2AtlasPolicy] = useState<'balanced' | 'min_pages' | 'min_waste'>('balanced')
+  const [v2AtlasPowerOfTwo, setV2AtlasPowerOfTwo] = useState(true)
+  const [v2AtlasAllowRotate, setV2AtlasAllowRotate] = useState(false)
+  const [v2AnimExportSequence, setV2AnimExportSequence] = useState(true)
+  const [v2AnimExportSpritesheet, setV2AnimExportSpritesheet] = useState(true)
+  const [v2AnimExportPlayerDesc, setV2AnimExportPlayerDesc] = useState(true)
+  const [v2AnimPivotMode, setV2AnimPivotMode] = useState<'center' | 'bottom_center' | 'custom'>('center')
+  const [v2AnimPivotUnit, setV2AnimPivotUnit] = useState<'normalized' | 'pixel'>('normalized')
+  const [v2AnimPivotX, setV2AnimPivotX] = useState('0.5')
+  const [v2AnimPivotY, setV2AnimPivotY] = useState('0.5')
+  const [v2UiEnable9Slice, setV2UiEnable9Slice] = useState(true)
+  const [v2UiEnableMultiScale, setV2UiEnableMultiScale] = useState(true)
+  const [v2UiEnableStateSplit, setV2UiEnableStateSplit] = useState(true)
+  const [v2UiScaleRatios, setV2UiScaleRatios] = useState('1,1.5,2')
+  const [v2UiStateSuffixRule, setV2UiStateSuffixRule] = useState('_normal,_hover,_pressed,_disabled')
+  const [v2GodotMetadataFormat, setV2GodotMetadataFormat] = useState<'json'>('json')
+  const [v2EnableManifest, setV2EnableManifest] = useState(true)
+  const [v2EnableExportLog, setV2EnableExportLog] = useState(true)
   const [selectedExportPreviewId, setSelectedExportPreviewId] = useState<string | null>(null)
   const [exportPreviewLightbox, setExportPreviewLightbox] = useState<{
     imageUrl: string
@@ -581,6 +612,103 @@ export function ProcessPage() {
     })
     setExportStatus(`已触发下载：${downloads.length} 个文件`)
     setShowExportModal(false)
+  }
+
+  const runV2InteractionPreview = () => {
+    void (async () => {
+      const ratioList = v2UiScaleRatios
+        .split(',')
+        .map((item) => Number(item.trim()))
+        .filter((item) => Number.isFinite(item) && item > 0)
+      const suffixes = v2UiStateSuffixRule
+        .split(',')
+        .map((item) => item.trim())
+        .filter(Boolean)
+      const scopeAssets = exportScope === 'selected' && selectedExportPreviewId
+        ? processedAssetsForActiveTab.filter((item) => item.id === selectedExportPreviewId)
+        : processedAssetsForActiveTab
+
+      const payload: ExportTaskSpec['payload'] =
+        v2ExportTemplate === 'atlas'
+          ? {
+              template: 'atlas',
+              config: {
+                autoSize: v2AtlasAutoSize,
+                maxSize: v2AtlasMaxSize,
+                padding: v2AtlasPadding,
+                extrude: v2AtlasExtrude,
+                policy: v2AtlasPolicy,
+                powerOfTwo: v2AtlasPowerOfTwo,
+                allowRotate: v2AtlasAllowRotate,
+              },
+            }
+          : v2ExportTemplate === 'animation'
+            ? {
+                template: 'animation',
+                config: {
+                  exportSequence: v2AnimExportSequence,
+                  exportSpritesheet: v2AnimExportSpritesheet,
+                  exportPlayerDesc: v2AnimExportPlayerDesc,
+                  pivotMode: v2AnimPivotMode,
+                  pivotUnit: v2AnimPivotUnit,
+                  pivotX: Number(v2AnimPivotX),
+                  pivotY: Number(v2AnimPivotY),
+                  fps: timeline.fps,
+                  loop: timeline.loop,
+                },
+              }
+            : v2ExportTemplate === 'ui_slice'
+              ? {
+                  template: 'ui_slice',
+                  config: {
+                    enable9Slice: v2UiEnable9Slice,
+                    enableMultiScale: v2UiEnableMultiScale,
+                    enableStateSplit: v2UiEnableStateSplit,
+                    scaleRatios: ratioList,
+                    stateSuffixes: suffixes,
+                  },
+                }
+              : {
+                  template: 'godot_package',
+                  config: {
+                    metadataFormat: v2GodotMetadataFormat,
+                    includeManifest: v2EnableManifest,
+                    includeExportLog: v2EnableExportLog,
+                  },
+                }
+
+      const task: ExportTaskSpec = {
+        profileName: v2ProfileName,
+        outputFolder: v2OutputFolder,
+        scope: exportScope,
+        payload,
+        assets: scopeAssets,
+      }
+
+      const issues = validateV2TaskSpec(task)
+      if (issues.length > 0) {
+        setExportStatus(`V2 导出校验未通过：${issues.join('；')}`)
+        return
+      }
+
+      setExportStatus('V2 导出执行中...')
+      try {
+        const result = await executeV2Export(task)
+        const downloads = result.artifacts.map((item) => ({
+          fileName: item.fileName,
+          url: URL.createObjectURL(item.blob),
+        }))
+        triggerDownloads(downloads, {
+          zipFileName: `${(v2ProfileName || 'v2_export').trim()}.zip`,
+        })
+        const warningSuffix = result.warnings.length > 0 ? `，警告 ${result.warnings.length} 条` : ''
+        setExportStatus(`${result.summary}${warningSuffix}`)
+        setShowExportModal(false)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'UNKNOWN_ERROR'
+        setExportStatus(`V2 导出失败：${message}`)
+      }
+    })()
   }
 
   const switchTabByKeyboard = (event: KeyboardEvent<HTMLDivElement>) => {
@@ -1205,30 +1333,145 @@ export function ProcessPage() {
         <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="导出参数">
           <div className="modal-card export-modal-card">
             <h3>导出参数</h3>
-            <div className="field-grid two-col">
-              <label>导出范围</label>
-              <select className="input" value={exportScope} onChange={(e) => setExportScope(e.target.value as 'all' | 'selected')}>
-                <option value="all">全部导出</option>
-                <option value="selected">导出选中</option>
-              </select>
-              <label>文件名前缀</label>
-              <input className="input" value={prefix} onChange={(e) => {
-                setPrefixTouched(true)
-                setPrefix(e.target.value)
-              }} />
-              <label>起始序号</label>
-              <input className="input" type="number" value={startIndex} onChange={(e) => setStartIndex(Math.max(0, Number(e.target.value) || 0))} />
-              <label>序号位数</label>
-              <input className="input" type="number" value={digits} onChange={(e) => setDigits(Math.max(1, Number(e.target.value) || 1))} />
-              <label>文件名后缀</label>
-              <input className="input" value={suffix} onChange={(e) => setSuffix(e.target.value)} />
-              <label>导出格式</label>
-              <select className="input" value={format} onChange={(e) => setFormat(e.target.value as ExportFormat)}>
-                <option value="PNG">PNG</option>
-                <option value="BMP">BMP</option>
-                <option value="WebP">WebP</option>
-              </select>
+            <div className="action-row" style={{ marginTop: 8 }}>
+              <button type="button" className={exportInteractionMode === 'classic' ? 'btn' : 'btn ghost'} onClick={() => setExportInteractionMode('classic')}>经典导出</button>
+              <button type="button" className={exportInteractionMode === 'v2' ? 'btn' : 'btn ghost'} onClick={() => setExportInteractionMode('v2')}>V2 交互预览</button>
             </div>
+
+            {exportInteractionMode === 'classic' && (
+              <div className="field-grid two-col">
+                <label>导出范围</label>
+                <select className="input" value={exportScope} onChange={(e) => setExportScope(e.target.value as 'all' | 'selected')}>
+                  <option value="all">全部导出</option>
+                  <option value="selected">导出选中</option>
+                </select>
+                <label>文件名前缀</label>
+                <input className="input" value={prefix} onChange={(e) => {
+                  setPrefixTouched(true)
+                  setPrefix(e.target.value)
+                }} />
+                <label>起始序号</label>
+                <input className="input" type="number" value={startIndex} onChange={(e) => setStartIndex(Math.max(0, Number(e.target.value) || 0))} />
+                <label>序号位数</label>
+                <input className="input" type="number" value={digits} onChange={(e) => setDigits(Math.max(1, Number(e.target.value) || 1))} />
+                <label>文件名后缀</label>
+                <input className="input" value={suffix} onChange={(e) => setSuffix(e.target.value)} />
+                <label>导出格式</label>
+                <select className="input" value={format} onChange={(e) => setFormat(e.target.value as ExportFormat)}>
+                  <option value="PNG">PNG</option>
+                  <option value="BMP">BMP</option>
+                  <option value="WebP">WebP</option>
+                </select>
+              </div>
+            )}
+
+            {exportInteractionMode === 'v2' && (
+              <>
+                <div className="action-row" style={{ marginTop: 8 }}>
+                  <button type="button" className={v2ExportTemplate === 'atlas' ? 'btn' : 'btn ghost'} onClick={() => setV2ExportTemplate('atlas')}>图集打包</button>
+                  <button type="button" className={v2ExportTemplate === 'animation' ? 'btn' : 'btn ghost'} onClick={() => setV2ExportTemplate('animation')}>动画序列导出</button>
+                  <button type="button" className={v2ExportTemplate === 'ui_slice' ? 'btn' : 'btn ghost'} onClick={() => setV2ExportTemplate('ui_slice')}>游戏 UI 专用切图</button>
+                  <button type="button" className={v2ExportTemplate === 'godot_package' ? 'btn' : 'btn ghost'} onClick={() => setV2ExportTemplate('godot_package')}>Godot 对接</button>
+                </div>
+
+                <div className="field-grid two-col">
+                  <label>导出配置名称</label>
+                  <input className="input" value={v2ProfileName} onChange={(e) => setV2ProfileName(e.target.value)} />
+                  <label>输出目录</label>
+                  <input className="input" value={v2OutputFolder} onChange={(e) => setV2OutputFolder(e.target.value)} />
+                  <label>导出范围</label>
+                  <select className="input" value={exportScope} onChange={(e) => setExportScope(e.target.value as 'all' | 'selected')}>
+                    <option value="all">全部导出</option>
+                    <option value="selected">导出选中</option>
+                  </select>
+                </div>
+
+                {v2ExportTemplate === 'atlas' && (
+                  <div className="field-grid two-col" style={{ marginTop: 12 }}>
+                    <label>图集尺寸</label>
+                    <div className="action-row" style={{ margin: 0 }}>
+                      <label className="hint"><input type="checkbox" checked={v2AtlasAutoSize} onChange={(e) => setV2AtlasAutoSize(e.target.checked)} /> 自动估算并提示</label>
+                    </div>
+                    <label>最大尺寸</label>
+                    <input className="input" type="number" value={v2AtlasMaxSize} disabled={v2AtlasAutoSize} onChange={(e) => setV2AtlasMaxSize(Math.max(256, Number(e.target.value) || 256))} />
+                    <label>策略</label>
+                    <select className="input" value={v2AtlasPolicy} onChange={(e) => setV2AtlasPolicy(e.target.value as 'balanced' | 'min_pages' | 'min_waste')}>
+                      <option value="balanced">平衡策略</option>
+                      <option value="min_pages">最少图集页数</option>
+                      <option value="min_waste">最小空白率</option>
+                    </select>
+                    <label>Padding / Extrude</label>
+                    <div className="action-row" style={{ margin: 0 }}>
+                      <input className="input" type="number" value={v2AtlasPadding} onChange={(e) => setV2AtlasPadding(Math.max(0, Number(e.target.value) || 0))} style={{ width: 120 }} />
+                      <input className="input" type="number" value={v2AtlasExtrude} onChange={(e) => setV2AtlasExtrude(Math.max(0, Number(e.target.value) || 0))} style={{ width: 120 }} />
+                    </div>
+                    <label>打包选项</label>
+                    <div className="action-row" style={{ margin: 0 }}>
+                      <label className="hint"><input type="checkbox" checked={v2AtlasPowerOfTwo} onChange={(e) => setV2AtlasPowerOfTwo(e.target.checked)} /> Power of Two</label>
+                      <label className="hint"><input type="checkbox" checked={v2AtlasAllowRotate} onChange={(e) => setV2AtlasAllowRotate(e.target.checked)} /> 允许旋转</label>
+                    </div>
+                  </div>
+                )}
+
+                {v2ExportTemplate === 'animation' && (
+                  <div className="field-grid two-col" style={{ marginTop: 12 }}>
+                    <label>输出形态</label>
+                    <div className="action-row" style={{ margin: 0 }}>
+                      <label className="hint"><input type="checkbox" checked={v2AnimExportSequence} onChange={(e) => setV2AnimExportSequence(e.target.checked)} /> 序列 + JSON</label>
+                      <label className="hint"><input type="checkbox" checked={v2AnimExportSpritesheet} onChange={(e) => setV2AnimExportSpritesheet(e.target.checked)} /> SpriteSheet + JSON</label>
+                      <label className="hint"><input type="checkbox" checked={v2AnimExportPlayerDesc} onChange={(e) => setV2AnimExportPlayerDesc(e.target.checked)} /> AnimationPlayer 描述</label>
+                    </div>
+                    <label>锚点模式</label>
+                    <select className="input" value={v2AnimPivotMode} onChange={(e) => setV2AnimPivotMode(e.target.value as 'center' | 'bottom_center' | 'custom')}>
+                      <option value="center">中心</option>
+                      <option value="bottom_center">底边中心</option>
+                      <option value="custom">自定义</option>
+                    </select>
+                    <label>自定义单位</label>
+                    <select className="input" value={v2AnimPivotUnit} disabled={v2AnimPivotMode !== 'custom'} onChange={(e) => setV2AnimPivotUnit(e.target.value as 'normalized' | 'pixel')}>
+                      <option value="normalized">归一化坐标</option>
+                      <option value="pixel">像素坐标</option>
+                    </select>
+                    <label>自定义锚点 X / Y</label>
+                    <div className="action-row" style={{ margin: 0 }}>
+                      <input className="input" value={v2AnimPivotX} disabled={v2AnimPivotMode !== 'custom'} onChange={(e) => setV2AnimPivotX(e.target.value)} style={{ width: 140 }} />
+                      <input className="input" value={v2AnimPivotY} disabled={v2AnimPivotMode !== 'custom'} onChange={(e) => setV2AnimPivotY(e.target.value)} style={{ width: 140 }} />
+                    </div>
+                  </div>
+                )}
+
+                {v2ExportTemplate === 'ui_slice' && (
+                  <div className="field-grid two-col" style={{ marginTop: 12 }}>
+                    <label>能力开关</label>
+                    <div className="action-row" style={{ margin: 0 }}>
+                      <label className="hint"><input type="checkbox" checked={v2UiEnable9Slice} onChange={(e) => setV2UiEnable9Slice(e.target.checked)} /> 九宫格切图</label>
+                      <label className="hint"><input type="checkbox" checked={v2UiEnableMultiScale} onChange={(e) => setV2UiEnableMultiScale(e.target.checked)} /> 多倍率导出</label>
+                      <label className="hint"><input type="checkbox" checked={v2UiEnableStateSplit} onChange={(e) => setV2UiEnableStateSplit(e.target.checked)} /> 状态图拆分</label>
+                    </div>
+                    <label>倍率列表</label>
+                    <input className="input" value={v2UiScaleRatios} onChange={(e) => setV2UiScaleRatios(e.target.value)} />
+                    <label>状态后缀规则</label>
+                    <input className="input" value={v2UiStateSuffixRule} onChange={(e) => setV2UiStateSuffixRule(e.target.value)} />
+                  </div>
+                )}
+
+                {v2ExportTemplate === 'godot_package' && (
+                  <div className="field-grid two-col" style={{ marginTop: 12 }}>
+                    <label>目标平台</label>
+                    <input className="input" value="Godot 4.x" disabled />
+                    <label>Metadata 格式</label>
+                    <select className="input" value={v2GodotMetadataFormat} onChange={(e) => setV2GodotMetadataFormat(e.target.value as 'json')}>
+                      <option value="json">JSON</option>
+                    </select>
+                    <label>附加产物</label>
+                    <div className="action-row" style={{ margin: 0 }}>
+                      <label className="hint"><input type="checkbox" checked={v2EnableManifest} onChange={(e) => setV2EnableManifest(e.target.checked)} /> 生成 manifest</label>
+                      <label className="hint"><input type="checkbox" checked={v2EnableExportLog} onChange={(e) => setV2EnableExportLog(e.target.checked)} /> 生成导出日志</label>
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
 
             <div className="slice-list" style={{ marginTop: 12 }}>
               <HorizontalImageScroller
@@ -1250,7 +1493,9 @@ export function ProcessPage() {
             </div>
 
             <div className="action-row">
-              <button type="button" className="btn" onClick={runExport}>确认导出</button>
+              <button type="button" className="btn" onClick={exportInteractionMode === 'classic' ? runExport : runV2InteractionPreview}>
+                {exportInteractionMode === 'classic' ? '确认导出' : '确认导出（V2）'}
+              </button>
               <button type="button" className="btn ghost" onClick={() => setShowExportModal(false)}>取消</button>
               <span className="hint">多文件自动打包为 ZIP，一次下载。</span>
               <span className="hint">{exportStatus}</span>
