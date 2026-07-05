@@ -342,11 +342,105 @@ function finalizeMattingOutput(canvas: HTMLCanvasElement, ctx: CanvasRenderingCo
       resolve({
         assetId: '',
         outputUrl: URL.createObjectURL(blob),
+        outputWidth: canvas.width,
+        outputHeight: canvas.height,
         algorithm: 'ai_general',
         warning,
       })
     }, 'image/png')
   })
+}
+
+async function processScaleStage(asset: ImageAsset, config: MattingConfig): Promise<MattingResult> {
+  const image = await new Promise<HTMLImageElement>((resolve, reject) => {
+    const img = new Image()
+    img.onload = () => resolve(img)
+    img.onerror = () => reject(new Error('IMAGE_LOAD_FAILED'))
+    img.src = asset.objectUrl
+  })
+
+  const ratioX = Math.max(0.01, Number.isFinite(config.scaleRatioX) ? config.scaleRatioX : 1)
+  const ratioY = Math.max(0.01, Number.isFinite(config.scaleRatioY) ? config.scaleRatioY : 1)
+  const targetWidth = Math.max(1, Math.round(image.naturalWidth * ratioX))
+  const targetHeight = Math.max(1, Math.round(image.naturalHeight * ratioY))
+
+  const canvas = document.createElement('canvas')
+  canvas.width = targetWidth
+  canvas.height = targetHeight
+  const ctx = canvas.getContext('2d')
+  if (!ctx) throw new Error('CANVAS_CONTEXT_FAILED')
+
+  ctx.imageSmoothingEnabled = true
+  ctx.imageSmoothingQuality = 'high'
+  ctx.clearRect(0, 0, targetWidth, targetHeight)
+  ctx.drawImage(image, 0, 0, targetWidth, targetHeight)
+
+  const result = await new Promise<MattingResult>((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (!blob) {
+        reject(new Error('PNG_EXPORT_FAILED'))
+        return
+      }
+      resolve({
+        assetId: asset.id,
+        outputUrl: URL.createObjectURL(blob),
+        outputWidth: targetWidth,
+        outputHeight: targetHeight,
+        algorithm: config.algorithm,
+        warning: `缩放：${image.naturalWidth}×${image.naturalHeight} -> ${targetWidth}×${targetHeight}（x=${ratioX.toFixed(3)}, y=${ratioY.toFixed(3)}）`,
+      })
+    }, 'image/png')
+  })
+
+  return result
+}
+
+async function processCropStage(asset: ImageAsset, config: MattingConfig): Promise<MattingResult> {
+  const image = await new Promise<HTMLImageElement>((resolve, reject) => {
+    const img = new Image()
+    img.onload = () => resolve(img)
+    img.onerror = () => reject(new Error('IMAGE_LOAD_FAILED'))
+    img.src = asset.objectUrl
+  })
+
+  const targetWidth = Math.max(1, Math.floor(config.cropWidth))
+  const targetHeight = Math.max(1, Math.floor(config.cropHeight))
+
+  const canvas = document.createElement('canvas')
+  canvas.width = targetWidth
+  canvas.height = targetHeight
+  const ctx = canvas.getContext('2d')
+  if (!ctx) throw new Error('CANVAS_CONTEXT_FAILED')
+
+  ctx.clearRect(0, 0, targetWidth, targetHeight)
+
+  const srcX = Math.max(0, Math.floor((image.naturalWidth - targetWidth) / 2))
+  const srcY = Math.max(0, Math.floor((image.naturalHeight - targetHeight) / 2))
+  const srcW = Math.min(image.naturalWidth, targetWidth)
+  const srcH = Math.min(image.naturalHeight, targetHeight)
+  const dstX = Math.max(0, Math.floor((targetWidth - image.naturalWidth) / 2))
+  const dstY = Math.max(0, Math.floor((targetHeight - image.naturalHeight) / 2))
+
+  ctx.drawImage(image, srcX, srcY, srcW, srcH, dstX, dstY, srcW, srcH)
+
+  const result = await new Promise<MattingResult>((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (!blob) {
+        reject(new Error('PNG_EXPORT_FAILED'))
+        return
+      }
+      resolve({
+        assetId: asset.id,
+        outputUrl: URL.createObjectURL(blob),
+        outputWidth: targetWidth,
+        outputHeight: targetHeight,
+        algorithm: config.algorithm,
+        warning: `中心裁剪：输出 ${targetWidth}×${targetHeight}（源图 ${image.naturalWidth}×${image.naturalHeight}，超出区域透明填充）`,
+      })
+    }, 'image/png')
+  })
+
+  return result
 }
 
 function applyBorderTrimToFrame(pixels: Uint8ClampedArray, width: number, height: number, config: MattingConfig) {
@@ -606,4 +700,12 @@ export async function runMattingMove(
   targetAnchor?: ContentAnchor,
 ): Promise<MattingResult> {
   return processMoveStage(asset, config, targetAnchor)
+}
+
+export async function runMattingScale(asset: ImageAsset, config: MattingConfig): Promise<MattingResult> {
+  return processScaleStage(asset, config)
+}
+
+export async function runMattingCrop(asset: ImageAsset, config: MattingConfig): Promise<MattingResult> {
+  return processCropStage(asset, config)
 }

@@ -16,6 +16,11 @@ export interface MattingConfig {
   trimBorderLeft: number
   moveBatchStrategy: MoveBatchStrategy
   moveAlphaThreshold: number
+  scaleRatioX: number
+  scaleRatioY: number
+  scaleLockAspect: boolean
+  cropWidth: number
+  cropHeight: number
   bgColorHex: string
   modelPath: string
 }
@@ -23,6 +28,8 @@ export interface MattingConfig {
 export interface MattingResult {
   assetId: string
   outputUrl: string
+  outputWidth: number
+  outputHeight: number
   algorithm: MattingAlgorithm
   warning?: string
 }
@@ -41,6 +48,11 @@ export const DEFAULT_MATTING_CONFIG: MattingConfig = {
   trimBorderLeft: 0,
   moveBatchStrategy: 'canvas_center',
   moveAlphaThreshold: 12,
+  scaleRatioX: 1,
+  scaleRatioY: 1,
+  scaleLockAspect: true,
+  cropWidth: 1024,
+  cropHeight: 1024,
   bgColorHex: '#ffffff',
   modelPath: '/models/u2net.onnx',
 }

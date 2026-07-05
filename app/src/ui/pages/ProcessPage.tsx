@@ -34,6 +34,34 @@ import {
 type SliceSubTab = 'split' | 'multi_size'
 type ExportInteractionMode = 'classic' | 'v2'
 type V2ExportTemplate = 'atlas' | 'animation' | 'ui_slice' | 'godot_package'
+type TimelineComposeMode = 'spritesheet'
+type TimelineComposeLayout = 'row_major' | 'column_major'
+
+interface TimelineGuidePoint {
+  id: string
+  x: number
+  y: number
+}
+
+interface TimelineMoveResult {
+  outputUrl: string
+  width: number
+  height: number
+}
+
+interface TimelineFrameGuides {
+  linesX: number[]
+  linesY: number[]
+  points: TimelineGuidePoint[]
+}
+
+type SelectedTimelineGuide =
+  | { type: 'point'; id: string }
+  | { type: 'x'; value: number }
+  | { type: 'y'; value: number }
+
+const SCALE_PRESET_OPTIONS = [0.25, 0.5, 0.75, 1.5] as const
+const CROP_PRESET_OPTIONS = [32, 128, 256, 512] as const
 
 export function ProcessPage() {
   const [lineTool, setLineTool] = useState<'x' | 'y'>('x')
@@ -88,6 +116,29 @@ export function ProcessPage() {
   const [v2GodotMetadataFormat, setV2GodotMetadataFormat] = useState<'json'>('json')
   const [v2EnableManifest, setV2EnableManifest] = useState(true)
   const [v2EnableExportLog, setV2EnableExportLog] = useState(true)
+  const [scalePresetRatio, setScalePresetRatio] = useState<number>(SCALE_PRESET_OPTIONS[0])
+  const [cropPresetSize, setCropPresetSize] = useState<number>(CROP_PRESET_OPTIONS[0])
+  const [showTimelineAddFrameModal, setShowTimelineAddFrameModal] = useState(false)
+  const [pendingTimelineFrameIds, setPendingTimelineFrameIds] = useState<string[]>([])
+  const [selectedTimelineFrameIds, setSelectedTimelineFrameIds] = useState<string[]>([])
+  const [showTimelineComposeModal, setShowTimelineComposeModal] = useState(false)
+  const [showTimelineAutoMoveModal, setShowTimelineAutoMoveModal] = useState(false)
+  const [timelineComposeMode, setTimelineComposeMode] = useState<TimelineComposeMode>('spritesheet')
+  const [timelineComposeLayout, setTimelineComposeLayout] = useState<TimelineComposeLayout>('row_major')
+  const [timelineComposeRows, setTimelineComposeRows] = useState(4)
+  const [timelineComposeCols, setTimelineComposeCols] = useState(4)
+  const [timelinePreviewShowGridNumber, setTimelinePreviewShowGridNumber] = useState(true)
+  const [timelineComposePreview, setTimelineComposePreview] = useState<{ imageUrl: string; meta: string } | null>(null)
+  const [timelineComposeStatus, setTimelineComposeStatus] = useState('')
+  const [timelineMoveAutoAlgorithm, setTimelineMoveAutoAlgorithm] = useState<'canvas_center' | 'median_anchor' | 'reference_frame'>('median_anchor')
+  const [timelineMoveStep, setTimelineMoveStep] = useState(1)
+  const [timelineMoveAlphaThreshold, setTimelineMoveAlphaThreshold] = useState(12)
+  const [timelineMoveStatus, setTimelineMoveStatus] = useState('')
+  const [timelineGuideDrawMode, setTimelineGuideDrawMode] = useState<'none' | 'x' | 'y' | 'point'>('none')
+  const [timelineGuidesByFrame, setTimelineGuidesByFrame] = useState<Record<string, TimelineFrameGuides>>({})
+  const [selectedTimelineGuideByFrame, setSelectedTimelineGuideByFrame] = useState<Record<string, SelectedTimelineGuide | null>>({})
+  const [timelineMoveResults, setTimelineMoveResults] = useState<Record<string, TimelineMoveResult>>({})
+  const [timelinePreviewRenderSize, setTimelinePreviewRenderSize] = useState({ width: 0, height: 0 })
   const [selectedExportPreviewId, setSelectedExportPreviewId] = useState<string | null>(null)
   const [exportPreviewLightbox, setExportPreviewLightbox] = useState<{
     imageUrl: string
@@ -100,9 +151,11 @@ export function ProcessPage() {
   const [tabAssets, setTabAssets] = useState<Record<ProcessTab, ImageAsset[]>>(createEmptyTabAssets)
 
   const previewImageRef = useRef<HTMLImageElement | null>(null)
+  const timelinePreviewImageRef = useRef<HTMLImageElement | null>(null)
   const latestTabAssetsRef = useRef<Record<ProcessTab, ImageAsset[]>>(createEmptyTabAssets())
   const latestSlicePreviewItemsRef = useRef<SlicePreviewItem[]>([])
   const latestResizePreviewAssetsRef = useRef<ImageAsset[]>([])
+  const latestTimelineMoveResultsRef = useRef<Record<string, TimelineMoveResult>>({})
   const tabRefs = useRef<Record<ProcessTab, HTMLButtonElement | null>>({
     slice: null,
     matting: null,
@@ -177,6 +230,14 @@ export function ProcessPage() {
     applyBorderToBatch,
     applyMoveToActive,
     applyMoveToBatch,
+    applyScaleToActive,
+    applyScaleToBatch,
+    applyCropToActive,
+    applyCropToBatch,
+    setScaleRatioX,
+    setScaleRatioY,
+    setScaleLockAspect,
+    setCropSize,
   } = useMattingWorkflow({
     mattingAssets: tabAssets.matting,
     mattingAsset,
@@ -190,14 +251,48 @@ export function ProcessPage() {
     dragFromIndex,
     setDragFromIndex,
     timelineAssets,
-    currentFrame,
+    timelineFrameIds,
     reorderTimelineFrame,
-    removeTimelineFrame,
+    addTimelineFrames,
+    clearTimelineFrames,
   } = useTimelineWorkflow({
     timelineSourceAssets: tabAssets.timeline,
     fps: timeline.fps,
     loop: timeline.loop,
   })
+
+  const timelineDisplayAssets = useMemo<ImageAsset[]>(() => {
+    return timelineAssets.map((asset) => {
+      const moved = timelineMoveResults[asset.id]
+      if (!moved) return asset
+      return {
+        ...asset,
+        objectUrl: moved.outputUrl,
+        width: moved.width,
+        height: moved.height,
+      }
+    })
+  }, [timelineAssets, timelineMoveResults])
+
+  const currentTimelineFrame = timelineDisplayAssets.length > 0 ? timelineDisplayAssets[frameIndex % timelineDisplayAssets.length] : null
+  const currentTimelineGuides = useMemo<TimelineFrameGuides>(() => {
+    if (!currentTimelineFrame) {
+      return { linesX: [], linesY: [], points: [] }
+    }
+    return timelineGuidesByFrame[currentTimelineFrame.id] ?? { linesX: [], linesY: [], points: [] }
+  }, [currentTimelineFrame, timelineGuidesByFrame])
+  const selectedTimelineGuide = useMemo<SelectedTimelineGuide | null>(() => {
+    if (!currentTimelineFrame) return null
+    return selectedTimelineGuideByFrame[currentTimelineFrame.id] ?? null
+  }, [currentTimelineFrame, selectedTimelineGuideByFrame])
+  const currentTimelineFrameHasEdits = useMemo(() => {
+    if (!currentTimelineFrame) return false
+    const hasMove = Boolean(timelineMoveResults[currentTimelineFrame.id])
+    const guides = timelineGuidesByFrame[currentTimelineFrame.id]
+    const hasGuides = Boolean(guides && (guides.linesX.length > 0 || guides.linesY.length > 0 || guides.points.length > 0))
+    const hasSelectedGuide = Boolean(selectedTimelineGuideByFrame[currentTimelineFrame.id])
+    return hasMove || hasGuides || hasSelectedGuide
+  }, [currentTimelineFrame, selectedTimelineGuideByFrame, timelineGuidesByFrame, timelineMoveResults])
 
   const assetScrollerItems = useMemo<HorizontalImageScrollerItem[]>(
     () =>
@@ -248,13 +343,13 @@ export function ProcessPage() {
   }, [slicePreviewItems, sliceSubTab, resizePreviewAssets])
 
   const internalImportOptions = useMemo(
-    () => buildInternalImportOptions({ activeTab, tabAssets, sliceResultAssets, mattingResults, timelineAssets }),
-    [activeTab, mattingResults, sliceResultAssets, tabAssets, timelineAssets],
+    () => buildInternalImportOptions({ activeTab, tabAssets, sliceResultAssets, mattingResults, timelineAssets: timelineDisplayAssets }),
+    [activeTab, mattingResults, sliceResultAssets, tabAssets, timelineDisplayAssets],
   )
 
   const processedAssetsForActiveTab = useMemo<ImageAsset[]>(() => {
-    return buildProcessedAssetsForTab({ activeTab, tabAssets, sliceResultAssets, mattingResults, timelineAssets })
-  }, [activeTab, mattingResults, sliceResultAssets, tabAssets, timelineAssets])
+    return buildProcessedAssetsForTab({ activeTab, tabAssets, sliceResultAssets, mattingResults, timelineAssets: timelineDisplayAssets })
+  }, [activeTab, mattingResults, sliceResultAssets, tabAssets, timelineDisplayAssets])
 
   const exportTargets = useMemo(() => {
     if (exportScope === 'selected') {
@@ -285,6 +380,18 @@ export function ProcessPage() {
     [processedAssetsForActiveTab],
   )
 
+  const timelineSourceOptions = useMemo(() => {
+    return tabAssets.timeline
+      .filter((asset) => !timelineFrameIds.includes(asset.id))
+      .map((asset) => ({
+        id: asset.id,
+        name: asset.name,
+        imageUrl: asset.objectUrl,
+        width: asset.width,
+        height: asset.height,
+      }))
+  }, [tabAssets.timeline, timelineFrameIds])
+
   const selectedSliceIndex = useMemo(() => {
     if (!selectedSlicePreview) return -1
     return slicePreviewItems.findIndex((item) => item.id === selectedSlicePreview.id)
@@ -297,6 +404,84 @@ export function ProcessPage() {
   useEffect(() => {
     latestResizePreviewAssetsRef.current = resizePreviewAssets
   }, [resizePreviewAssets])
+
+  useEffect(() => {
+    latestTimelineMoveResultsRef.current = timelineMoveResults
+  }, [timelineMoveResults])
+
+  useEffect(() => {
+    setTimelineMoveResults((prev) => {
+      const validIds = new Set(timelineAssets.map((asset) => asset.id))
+      let changed = false
+      const next: Record<string, TimelineMoveResult> = {}
+      for (const [key, value] of Object.entries(prev)) {
+        if (validIds.has(key)) {
+          next[key] = value
+        } else {
+          URL.revokeObjectURL(value.outputUrl)
+          changed = true
+        }
+      }
+      return changed ? next : prev
+    })
+  }, [timelineAssets])
+
+  useEffect(() => {
+    const validIds = new Set(timelineAssets.map((asset) => asset.id))
+    setSelectedTimelineGuideByFrame((prev) => {
+      let changed = false
+      const next: Record<string, SelectedTimelineGuide | null> = {}
+      for (const [frameId, selected] of Object.entries(prev)) {
+        if (validIds.has(frameId)) {
+          next[frameId] = selected
+        } else {
+          changed = true
+        }
+      }
+      return changed ? next : prev
+    })
+  }, [timelineAssets])
+
+  useEffect(() => {
+    return () => {
+      Object.values(latestTimelineMoveResultsRef.current).forEach((item) => URL.revokeObjectURL(item.outputUrl))
+    }
+  }, [])
+
+  useEffect(() => {
+    setSelectedTimelineFrameIds((prev) => prev.filter((id) => timelineAssets.some((asset) => asset.id === id)))
+  }, [timelineAssets])
+
+  useEffect(() => {
+    if (!selectedTimelineGuide) return
+    if (selectedTimelineGuide.type === 'point') {
+      if (!currentTimelineGuides.points.some((point) => point.id === selectedTimelineGuide.id)) {
+        if (currentTimelineFrame) {
+          setSelectedTimelineGuideByFrame((prev) => ({ ...prev, [currentTimelineFrame.id]: null }))
+        }
+      }
+      return
+    }
+    if (selectedTimelineGuide.type === 'x' && !currentTimelineGuides.linesX.includes(selectedTimelineGuide.value)) {
+      if (currentTimelineFrame) {
+        setSelectedTimelineGuideByFrame((prev) => ({ ...prev, [currentTimelineFrame.id]: null }))
+      }
+      return
+    }
+    if (selectedTimelineGuide.type === 'y' && !currentTimelineGuides.linesY.includes(selectedTimelineGuide.value)) {
+      if (currentTimelineFrame) {
+        setSelectedTimelineGuideByFrame((prev) => ({ ...prev, [currentTimelineFrame.id]: null }))
+      }
+    }
+  }, [currentTimelineFrame, currentTimelineGuides, selectedTimelineGuide])
+
+  useEffect(() => {
+    return () => {
+      if (timelineComposePreview) {
+        URL.revokeObjectURL(timelineComposePreview.imageUrl)
+      }
+    }
+  }, [timelineComposePreview])
 
   useEffect(() => {
     if (activeTab !== 'slice') {
@@ -336,6 +521,24 @@ export function ProcessPage() {
       window.removeEventListener('resize', updateSize)
     }
   }, [sliceAsset?.id, activeTab])
+
+  useEffect(() => {
+    const img = timelinePreviewImageRef.current
+    if (!img) return
+
+    const updateSize = () => {
+      setTimelinePreviewRenderSize({ width: img.clientWidth, height: img.clientHeight })
+    }
+
+    updateSize()
+    const observer = new ResizeObserver(() => updateSize())
+    observer.observe(img)
+    window.addEventListener('resize', updateSize)
+    return () => {
+      observer.disconnect()
+      window.removeEventListener('resize', updateSize)
+    }
+  }, [currentTimelineFrame?.id])
 
   const setSelectedAssetForTab = (tab: ProcessTab, assetId: string) => {
     setSelectedAssetsByTab((prev) => ({ ...prev, [tab]: assetId }))
@@ -709,6 +912,618 @@ export function ProcessPage() {
         setExportStatus(`V2 导出失败：${message}`)
       }
     })()
+  }
+
+  const togglePendingTimelineFrame = (assetId: string) => {
+    setPendingTimelineFrameIds((prev) =>
+      prev.includes(assetId) ? prev.filter((id) => id !== assetId) : [...prev, assetId],
+    )
+  }
+
+  const confirmAddTimelineFrames = () => {
+    if (pendingTimelineFrameIds.length === 0) return
+    addTimelineFrames(pendingTimelineFrameIds)
+    setTimelineComposeStatus(`已添加帧：${pendingTimelineFrameIds.length} 张`)
+    setPendingTimelineFrameIds([])
+    setShowTimelineAddFrameModal(false)
+  }
+
+  const toggleTimelineFrameSelection = (assetId: string) => {
+    setSelectedTimelineFrameIds((prev) =>
+      prev.includes(assetId) ? prev.filter((id) => id !== assetId) : [...prev, assetId],
+    )
+  }
+
+  const toggleSelectAllPendingTimelineFrames = () => {
+    const allIds = timelineSourceOptions.map((asset) => asset.id)
+    if (allIds.length === 0) return
+    setPendingTimelineFrameIds((prev) => {
+      const allSelected = allIds.every((id) => prev.includes(id))
+      return allSelected ? [] : allIds
+    })
+  }
+
+  const removeTimelineFrameWithRelatedData = (assetId: string) => {
+    clearTimelineFrames([assetId])
+    setSelectedTimelineFrameIds((prev) => prev.filter((id) => id !== assetId))
+    setTimelineGuidesByFrame((prev) => {
+      if (!(assetId in prev)) return prev
+      const next = { ...prev }
+      delete next[assetId]
+      return next
+    })
+    setSelectedTimelineGuideByFrame((prev) => {
+      if (!(assetId in prev)) return prev
+      const next = { ...prev }
+      delete next[assetId]
+      return next
+    })
+    setTimelineMoveResults((prev) => {
+      const current = prev[assetId]
+      if (!current) return prev
+      URL.revokeObjectURL(current.outputUrl)
+      const next = { ...prev }
+      delete next[assetId]
+      return next
+    })
+  }
+
+  const clearAllTimelineFramesWithRelatedData = () => {
+    if (timelineAssets.length === 0) return
+    const allIds = timelineAssets.map((asset) => asset.id)
+    clearTimelineFrames(allIds)
+    setSelectedTimelineFrameIds([])
+    setPendingTimelineFrameIds([])
+    setTimelineGuidesByFrame({})
+    setSelectedTimelineGuideByFrame({})
+    setTimelineMoveResults((prev) => {
+      Object.values(prev).forEach((item) => URL.revokeObjectURL(item.outputUrl))
+      return {}
+    })
+    setTimelineMoveStatus('已清除所有帧与关联改动')
+    setTimelineComposeStatus(`已清除所有帧：${allIds.length} 张`)
+  }
+
+  const resetCurrentTimelineFrameChanges = () => {
+    if (!currentTimelineFrame) return
+    const frameId = currentTimelineFrame.id
+
+    setTimelineMoveResults((prev) => {
+      const current = prev[frameId]
+      if (!current) return prev
+      URL.revokeObjectURL(current.outputUrl)
+      const next = { ...prev }
+      delete next[frameId]
+      return next
+    })
+
+    setTimelineGuidesByFrame((prev) => {
+      if (!(frameId in prev)) return prev
+      const next = { ...prev }
+      delete next[frameId]
+      return next
+    })
+
+    setSelectedTimelineGuideByFrame((prev) => {
+      if (!(frameId in prev)) return prev
+      const next = { ...prev }
+      delete next[frameId]
+      return next
+    })
+
+    setTimelineMoveStatus(`已重置当前帧：${currentTimelineFrame.name}`)
+  }
+
+  const updateTimelineComposePreview = (next: { imageUrl: string; meta: string } | null) => {
+    setTimelineComposePreview((prev) => {
+      if (prev) URL.revokeObjectURL(prev.imageUrl)
+      return next
+    })
+  }
+
+  const buildTimelineSpritesheet = async () => {
+    if (timelineDisplayAssets.length === 0) {
+      throw new Error('没有可合成的帧')
+    }
+
+    const rows = Math.max(1, Math.floor(timelineComposeRows))
+    const cols = Math.max(1, Math.floor(timelineComposeCols))
+    const capacity = rows * cols
+    if (capacity <= 0) {
+      throw new Error('行列设置无效')
+    }
+
+    const frames = timelineDisplayAssets.slice(0, capacity)
+    const images = await Promise.all(
+      frames.map(
+        (asset) =>
+          new Promise<HTMLImageElement>((resolve, reject) => {
+            const img = new Image()
+            img.onload = () => resolve(img)
+            img.onerror = () => reject(new Error('TIMELINE_IMAGE_LOAD_FAILED'))
+            img.src = asset.objectUrl
+          }),
+      ),
+    )
+
+    const cellW = Math.max(...images.map((img) => img.naturalWidth), 1)
+    const cellH = Math.max(...images.map((img) => img.naturalHeight), 1)
+    const canvas = document.createElement('canvas')
+    canvas.width = cols * cellW
+    canvas.height = rows * cellH
+    const ctx = canvas.getContext('2d')
+    if (!ctx) throw new Error('无法创建画布上下文')
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height)
+
+    const metaFrames: Array<{ index: number; name: string; row: number; col: number; x: number; y: number; w: number; h: number }> = []
+    images.forEach((img, index) => {
+      const row = timelineComposeLayout === 'row_major' ? Math.floor(index / cols) : index % rows
+      const col = timelineComposeLayout === 'row_major' ? index % cols : Math.floor(index / rows)
+      const x = col * cellW + Math.floor((cellW - img.naturalWidth) / 2)
+      const y = row * cellH + Math.floor((cellH - img.naturalHeight) / 2)
+      ctx.drawImage(img, x, y)
+      metaFrames.push({
+        index,
+        name: frames[index].name,
+        row,
+        col,
+        x,
+        y,
+        w: img.naturalWidth,
+        h: img.naturalHeight,
+      })
+    })
+
+    const sheetBlob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/png'))
+    if (!sheetBlob) throw new Error('输出图片失败')
+
+    const metaPayload = {
+      mode: timelineComposeMode,
+      layout: timelineComposeLayout,
+      rows,
+      cols,
+      cellWidth: cellW,
+      cellHeight: cellH,
+      sheetWidth: canvas.width,
+      sheetHeight: canvas.height,
+      frameCount: frames.length,
+      sourceFrameCount: timelineDisplayAssets.length,
+      frames: metaFrames,
+    }
+    const metaBlob = new Blob([JSON.stringify(metaPayload, null, 2)], { type: 'application/json' })
+
+    return {
+      rows,
+      cols,
+      capacity,
+      frameCount: frames.length,
+      sourceFrameCount: timelineAssets.length,
+      sheetBlob,
+      metaBlob,
+      metaPayload,
+    }
+  }
+
+  const previewTimelineCompose = async () => {
+    try {
+      const result = await buildTimelineSpritesheet()
+      const previewCanvas = document.createElement('canvas')
+      previewCanvas.width = result.metaPayload.sheetWidth
+      previewCanvas.height = result.metaPayload.sheetHeight
+      const previewCtx = previewCanvas.getContext('2d')
+      if (!previewCtx) throw new Error('预览画布创建失败')
+
+      const sheetImage = await new Promise<HTMLImageElement>((resolve, reject) => {
+        const img = new Image()
+        img.onload = () => resolve(img)
+        img.onerror = () => reject(new Error('PREVIEW_SHEET_LOAD_FAILED'))
+        img.src = URL.createObjectURL(result.sheetBlob)
+      })
+
+      previewCtx.drawImage(sheetImage, 0, 0)
+      if (timelinePreviewShowGridNumber) {
+        previewCtx.strokeStyle = 'rgba(79, 111, 255, 0.7)'
+        previewCtx.fillStyle = 'rgba(79, 111, 255, 0.9)'
+        previewCtx.font = '12px sans-serif'
+        for (let r = 0; r < result.rows; r += 1) {
+          for (let c = 0; c < result.cols; c += 1) {
+            const x = c * result.metaPayload.cellWidth
+            const y = r * result.metaPayload.cellHeight
+            previewCtx.strokeRect(x + 0.5, y + 0.5, result.metaPayload.cellWidth - 1, result.metaPayload.cellHeight - 1)
+            previewCtx.fillText(`${r},${c}`, x + 6, y + 16)
+          }
+        }
+      }
+
+      const previewBlob = await new Promise<Blob | null>((resolve) => previewCanvas.toBlob(resolve, 'image/png'))
+      if (!previewBlob) throw new Error('预览图片输出失败')
+      updateTimelineComposePreview({
+        imageUrl: URL.createObjectURL(previewBlob),
+        meta: `${result.rows}×${result.cols} · ${result.metaPayload.sheetWidth}×${result.metaPayload.sheetHeight} · 帧 ${result.frameCount}/${result.sourceFrameCount}`,
+      })
+      setTimelineComposeStatus('预览已更新')
+      URL.revokeObjectURL(sheetImage.src)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '未知错误'
+      setTimelineComposeStatus(`预览失败：${message}`)
+    }
+  }
+
+  const composeTimelineSpritesheet = async () => {
+    try {
+      const result = await buildTimelineSpritesheet()
+      const fileBase = `timeline_spritesheet_${Date.now()}`
+      triggerDownloads(
+        [
+          { fileName: `${fileBase}.png`, url: URL.createObjectURL(result.sheetBlob) },
+        ],
+      )
+
+      const overflowText = result.sourceFrameCount > result.capacity ? `，超出 ${result.sourceFrameCount - result.capacity} 帧未参与合成` : ''
+      setTimelineComposeStatus(`合成完成：${result.frameCount} 帧，${result.rows}×${result.cols}${overflowText}`)
+      setShowTimelineComposeModal(false)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '未知错误'
+      setTimelineComposeStatus(`合成失败：${message}`)
+    }
+  }
+
+  const setTimelineMoveResult = (assetId: string, result: TimelineMoveResult) => {
+    setTimelineMoveResults((prev) => {
+      const old = prev[assetId]
+      if (old) URL.revokeObjectURL(old.outputUrl)
+      return {
+        ...prev,
+        [assetId]: result,
+      }
+    })
+  }
+
+  const mutateFrameGuides = (assetId: string, updater: (prev: TimelineFrameGuides) => TimelineFrameGuides) => {
+    setTimelineGuidesByFrame((prev) => {
+      const current = prev[assetId] ?? { linesX: [], linesY: [], points: [] }
+      const next = updater(current)
+      return {
+        ...prev,
+        [assetId]: next,
+      }
+    })
+  }
+
+  const shiftFrameGuides = (assetId: string, dx: number, dy: number, width: number, height: number) => {
+    mutateFrameGuides(assetId, (prev) => ({
+      linesX: prev.linesX.map((x) => Math.max(0, Math.min(width, x + dx))),
+      linesY: prev.linesY.map((y) => Math.max(0, Math.min(height, y + dy))),
+      points: prev.points.map((point) => ({
+        ...point,
+        x: Math.max(0, Math.min(width, point.x + dx)),
+        y: Math.max(0, Math.min(height, point.y + dy)),
+      })),
+    }))
+  }
+
+  const syncSelectedGuideLineAfterFrameShift = (assetId: string, dx: number, dy: number, width: number, height: number) => {
+    setSelectedTimelineGuideByFrame((prev) => {
+      const selected = prev[assetId]
+      if (!selected) return prev
+      if (selected.type !== 'x' && selected.type !== 'y') return prev
+      const moved = selected.type === 'x' ? selected.value + dx : selected.value + dy
+      const limit = selected.type === 'x' ? width : height
+      return {
+        ...prev,
+        [assetId]: {
+          type: selected.type,
+          value: Math.max(0, Math.min(limit, moved)),
+        },
+      }
+    })
+  }
+
+  const setCurrentFrameSelectedGuide = (next: SelectedTimelineGuide | null) => {
+    if (!currentTimelineFrame) return
+    setSelectedTimelineGuideByFrame((prev) => ({
+      ...prev,
+      [currentTimelineFrame.id]: next,
+    }))
+  }
+
+  const toggleCurrentFrameSelectedGuide = (candidate: SelectedTimelineGuide) => {
+    const isSame =
+      (selectedTimelineGuide?.type === 'point' && candidate.type === 'point' && selectedTimelineGuide.id === candidate.id) ||
+      (selectedTimelineGuide?.type === 'x' && candidate.type === 'x' && selectedTimelineGuide.value === candidate.value) ||
+      (selectedTimelineGuide?.type === 'y' && candidate.type === 'y' && selectedTimelineGuide.value === candidate.value)
+    setCurrentFrameSelectedGuide(isSame ? null : candidate)
+  }
+
+  const detectTimelineAnchor = async (asset: ImageAsset, alphaThreshold: number) => {
+    const image = await new Promise<HTMLImageElement>((resolve, reject) => {
+      const img = new Image()
+      img.onload = () => resolve(img)
+      img.onerror = () => reject(new Error('TIMELINE_IMAGE_LOAD_FAILED'))
+      img.src = asset.objectUrl
+    })
+
+    const canvas = document.createElement('canvas')
+    canvas.width = image.naturalWidth
+    canvas.height = image.naturalHeight
+    const ctx = canvas.getContext('2d')
+    if (!ctx) throw new Error('TIMELINE_CONTEXT_FAILED')
+    ctx.drawImage(image, 0, 0)
+    const pixels = ctx.getImageData(0, 0, canvas.width, canvas.height).data
+
+    const threshold = Math.max(0, Math.min(254, Math.floor(alphaThreshold)))
+    let minX = canvas.width
+    let minY = canvas.height
+    let maxX = -1
+    let maxY = -1
+
+    for (let y = 0; y < canvas.height; y += 1) {
+      for (let x = 0; x < canvas.width; x += 1) {
+        const alpha = pixels[(y * canvas.width + x) * 4 + 3]
+        if (alpha <= threshold) continue
+        if (x < minX) minX = x
+        if (y < minY) minY = y
+        if (x > maxX) maxX = x
+        if (y > maxY) maxY = y
+      }
+    }
+
+    if (maxX < minX || maxY < minY) return null
+    return {
+      x: (minX + maxX) / 2,
+      y: (minY + maxY) / 2,
+    }
+  }
+
+  const moveTimelineAsset = async (asset: ImageAsset, dx: number, dy: number): Promise<TimelineMoveResult> => {
+    const image = await new Promise<HTMLImageElement>((resolve, reject) => {
+      const img = new Image()
+      img.onload = () => resolve(img)
+      img.onerror = () => reject(new Error('TIMELINE_IMAGE_LOAD_FAILED'))
+      img.src = asset.objectUrl
+    })
+
+    const canvas = document.createElement('canvas')
+    canvas.width = image.naturalWidth
+    canvas.height = image.naturalHeight
+    const ctx = canvas.getContext('2d')
+    if (!ctx) throw new Error('TIMELINE_CONTEXT_FAILED')
+    ctx.clearRect(0, 0, canvas.width, canvas.height)
+    ctx.drawImage(image, dx, dy)
+
+    const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/png'))
+    if (!blob) throw new Error('TIMELINE_MOVE_EXPORT_FAILED')
+
+    return {
+      outputUrl: URL.createObjectURL(blob),
+      width: canvas.width,
+      height: canvas.height,
+    }
+  }
+
+  const applyTimelineAutoMove = async () => {
+    if (timelineDisplayAssets.length === 0) {
+      setTimelineMoveStatus('没有可移动的帧')
+      return
+    }
+
+    const anchors = await Promise.all(
+      timelineDisplayAssets.map(async (asset) => ({
+        asset,
+        anchor: await detectTimelineAnchor(asset, timelineMoveAlphaThreshold),
+      })),
+    )
+
+    let targetX: number | null = null
+    let targetY: number | null = null
+
+    if (timelineMoveAutoAlgorithm === 'median_anchor') {
+      const xs = anchors.map((item) => item.anchor?.x).filter((value): value is number => Number.isFinite(value))
+      const ys = anchors.map((item) => item.anchor?.y).filter((value): value is number => Number.isFinite(value))
+      if (xs.length === 0 || ys.length === 0) {
+        setTimelineMoveStatus('自动移动失败：未检测到有效前景')
+        return
+      }
+      xs.sort((a, b) => a - b)
+      ys.sort((a, b) => a - b)
+      targetX = xs[Math.floor(xs.length / 2)]
+      targetY = ys[Math.floor(ys.length / 2)]
+    } else if (timelineMoveAutoAlgorithm === 'reference_frame') {
+      const reference = anchors[frameIndex] ?? anchors[0]
+      if (!reference?.anchor) {
+        setTimelineMoveStatus('自动移动失败：参考帧未检测到前景')
+        return
+      }
+      targetX = reference.anchor.x
+      targetY = reference.anchor.y
+    }
+
+    let movedCount = 0
+    for (const { asset, anchor } of anchors) {
+      const target =
+        timelineMoveAutoAlgorithm === 'canvas_center'
+          ? { x: (asset.width - 1) / 2, y: (asset.height - 1) / 2 }
+          : { x: targetX ?? (asset.width - 1) / 2, y: targetY ?? (asset.height - 1) / 2 }
+
+      if (!anchor) continue
+      const dx = Math.round(target.x - anchor.x)
+      const dy = Math.round(target.y - anchor.y)
+      const moved = await moveTimelineAsset(asset, dx, dy)
+      setTimelineMoveResult(asset.id, moved)
+      shiftFrameGuides(asset.id, dx, dy, moved.width, moved.height)
+      syncSelectedGuideLineAfterFrameShift(asset.id, dx, dy, moved.width, moved.height)
+      movedCount += 1
+    }
+
+    setTimelineMoveStatus(`自动移动完成：${movedCount}/${timelineDisplayAssets.length} 帧`) 
+  }
+
+  const nudgeCurrentTimelineFrame = async (dx: number, dy: number) => {
+    if (!currentTimelineFrame) return
+    const moved = await moveTimelineAsset(currentTimelineFrame, dx, dy)
+    setTimelineMoveResult(currentTimelineFrame.id, moved)
+    shiftFrameGuides(currentTimelineFrame.id, dx, dy, moved.width, moved.height)
+    syncSelectedGuideLineAfterFrameShift(currentTimelineFrame.id, dx, dy, moved.width, moved.height)
+    setTimelineMoveStatus(`手动微调：${currentTimelineFrame.name}（dx=${dx}, dy=${dy}）`)
+  }
+
+  const clearTimelineMoveResults = () => {
+    setTimelineMoveResults((prev) => {
+      Object.values(prev).forEach((item) => URL.revokeObjectURL(item.outputUrl))
+      return {}
+    })
+    setTimelineMoveStatus('已清除移动结果')
+  }
+
+  const resolveTimelineOverlayX = (x: number) => {
+    if (!currentTimelineFrame) return '0%'
+    if (timelinePreviewRenderSize.width > 0) return `${(x / currentTimelineFrame.width) * timelinePreviewRenderSize.width}px`
+    return `${(x / currentTimelineFrame.width) * 100}%`
+  }
+
+  const resolveTimelineOverlayY = (y: number) => {
+    if (!currentTimelineFrame) return '0%'
+    if (timelinePreviewRenderSize.height > 0) return `${(y / currentTimelineFrame.height) * timelinePreviewRenderSize.height}px`
+    return `${(y / currentTimelineFrame.height) * 100}%`
+  }
+
+  const handleTimelineGuideAdd = (event: React.MouseEvent<HTMLDivElement>) => {
+    if (!currentTimelineFrame || timelineGuideDrawMode === 'none') return
+    const rect = event.currentTarget.getBoundingClientRect()
+    const scaleX = currentTimelineFrame.width / rect.width
+    const scaleY = currentTimelineFrame.height / rect.height
+    const x = Math.max(0, Math.min(currentTimelineFrame.width, Math.floor((event.clientX - rect.left) * scaleX)))
+    const y = Math.max(0, Math.min(currentTimelineFrame.height, Math.floor((event.clientY - rect.top) * scaleY)))
+
+    if (timelineGuideDrawMode === 'x') {
+      mutateFrameGuides(currentTimelineFrame.id, (prev) => ({
+        ...prev,
+        linesX: prev.linesX.includes(x) ? prev.linesX : [...prev.linesX, x],
+      }))
+      setCurrentFrameSelectedGuide({ type: 'x', value: x })
+      return
+    }
+    if (timelineGuideDrawMode === 'y') {
+      mutateFrameGuides(currentTimelineFrame.id, (prev) => ({
+        ...prev,
+        linesY: prev.linesY.includes(y) ? prev.linesY : [...prev.linesY, y],
+      }))
+      setCurrentFrameSelectedGuide({ type: 'y', value: y })
+      return
+    }
+    const point = { id: `p-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, x, y }
+    mutateFrameGuides(currentTimelineFrame.id, (prev) => ({
+      ...prev,
+      points: [...prev.points, point],
+    }))
+    setCurrentFrameSelectedGuide({ type: 'point', id: point.id })
+  }
+
+  const alignTimelineToSelectedGuide = async () => {
+    if (!currentTimelineFrame) {
+      setTimelineMoveStatus('请先选择当前帧')
+      return
+    }
+    if (!selectedTimelineGuide) {
+      setTimelineMoveStatus('请先选中一个基准')
+      return
+    }
+    if (timelineDisplayAssets.length === 0) {
+      setTimelineMoveStatus('没有可对齐的帧')
+      return
+    }
+
+    const candidates = timelineDisplayAssets.filter((asset) => asset.id !== currentTimelineFrame.id)
+    let eligibleCount = 0
+    let movedCount = 0
+    for (const asset of candidates) {
+      const frameGuides = timelineGuidesByFrame[asset.id]
+      if (!frameGuides) continue
+      const frameSelectedGuide = selectedTimelineGuideByFrame[asset.id]
+      if (!frameSelectedGuide) continue
+      if (frameSelectedGuide.type !== selectedTimelineGuide.type) continue
+
+      let dx = 0
+      let dy = 0
+      let canAlign = false
+
+      if (selectedTimelineGuide.type === 'point') {
+        if (frameSelectedGuide.type !== 'point') continue
+        const target = currentTimelineGuides.points.find((point) => point.id === selectedTimelineGuide.id)
+        if (!target) continue
+        const sourcePoint = frameGuides.points.find((point) => point.id === frameSelectedGuide.id)
+        if (!sourcePoint) continue
+        dx = Math.round(target.x - sourcePoint.x)
+        dy = Math.round(target.y - sourcePoint.y)
+        canAlign = true
+      } else if (selectedTimelineGuide.type === 'x') {
+        if (frameSelectedGuide.type !== 'x') continue
+        const sourceLine = frameSelectedGuide.value
+        if (!frameGuides.linesX.includes(sourceLine)) continue
+        dx = Math.round(selectedTimelineGuide.value - sourceLine)
+        canAlign = true
+      } else if (selectedTimelineGuide.type === 'y') {
+        if (frameSelectedGuide.type !== 'y') continue
+        const sourceLine = frameSelectedGuide.value
+        if (!frameGuides.linesY.includes(sourceLine)) continue
+        dy = Math.round(selectedTimelineGuide.value - sourceLine)
+        canAlign = true
+      }
+
+      if (!canAlign) continue
+      eligibleCount += 1
+      const moved = await moveTimelineAsset(asset, dx, dy)
+      setTimelineMoveResult(asset.id, moved)
+      shiftFrameGuides(asset.id, dx, dy, moved.width, moved.height)
+      syncSelectedGuideLineAfterFrameShift(asset.id, dx, dy, moved.width, moved.height)
+      movedCount += 1
+    }
+    setTimelineMoveStatus(eligibleCount > 0 ? `对齐基准完成：${movedCount}/${eligibleCount} 帧` : '未找到可对齐帧：其他帧缺少同类型基准')
+  }
+
+  const centerSelectedTimelineGuideInCurrentFrame = async () => {
+    if (!currentTimelineFrame) {
+      setTimelineMoveStatus('请先选择当前帧')
+      return
+    }
+    if (!selectedTimelineGuide) {
+      setTimelineMoveStatus('请先选中一个基准')
+      return
+    }
+
+    const centerX = Math.round(currentTimelineFrame.width / 2)
+    const centerY = Math.round(currentTimelineFrame.height / 2)
+    let dx = 0
+    let dy = 0
+
+    if (selectedTimelineGuide.type === 'point') {
+      const point = currentTimelineGuides.points.find((item) => item.id === selectedTimelineGuide.id)
+      if (!point) {
+        setTimelineMoveStatus('选中的基准点不存在')
+        return
+      }
+      dx = Math.round(centerX - point.x)
+      dy = Math.round(centerY - point.y)
+    } else if (selectedTimelineGuide.type === 'x') {
+      if (!currentTimelineGuides.linesX.includes(selectedTimelineGuide.value)) {
+        setTimelineMoveStatus('选中的竖线基准不存在')
+        return
+      }
+      dx = Math.round(centerX - selectedTimelineGuide.value)
+    } else {
+      if (!currentTimelineGuides.linesY.includes(selectedTimelineGuide.value)) {
+        setTimelineMoveStatus('选中的横线基准不存在')
+        return
+      }
+      dy = Math.round(centerY - selectedTimelineGuide.value)
+    }
+
+    const moved = await moveTimelineAsset(currentTimelineFrame, dx, dy)
+    setTimelineMoveResult(currentTimelineFrame.id, moved)
+    shiftFrameGuides(currentTimelineFrame.id, dx, dy, moved.width, moved.height)
+    syncSelectedGuideLineAfterFrameShift(currentTimelineFrame.id, dx, dy, moved.width, moved.height)
+    setTimelineMoveStatus(`基准居中完成：${currentTimelineFrame.name}（dx=${dx}, dy=${dy}）`)
   }
 
   const switchTabByKeyboard = (event: KeyboardEvent<HTMLDivElement>) => {
@@ -1186,6 +2001,133 @@ export function ProcessPage() {
               )}
             />
 
+            <ProcessActionCard
+              title="缩放"
+              density="compact"
+              actions={(
+                <>
+                  <button type="button" className="btn" onClick={applyScaleToActive} disabled={!mattingAsset || mattingProcessing}>应用</button>
+                  <button type="button" className="btn ghost" onClick={applyScaleToBatch} disabled={tabAssets.matting.length === 0 || mattingProcessing}>批量</button>
+                </>
+              )}
+              config={(
+                <div className="border-mode-config" style={{ width: 'fit-content', marginLeft: 'auto' }}>
+                  <label className="hint" style={{ display: 'inline-flex', alignItems: 'center', gap: 6, width: '100%', justifyContent: 'flex-end' }}>
+                    <input
+                      type="checkbox"
+                      checked={mattingConfig.scaleLockAspect}
+                      onChange={(e) => setScaleLockAspect(e.target.checked)}
+                    />
+                    锁定 X/Y 比例
+                  </label>
+                  <div
+                    className="field-grid"
+                    style={{
+                      margin: 0,
+                      width: 'fit-content',
+                      gridTemplateColumns: 'auto 92px auto 92px auto 128px',
+                      alignItems: 'center',
+                    }}
+                  >
+                    <label>X 比例</label>
+                    <input
+                      className="input"
+                      type="number"
+                      min={0.01}
+                      step={0.01}
+                      value={mattingConfig.scaleRatioX}
+                      onChange={(e) => setScaleRatioX(e.target.value)}
+                    />
+                    <label>Y 比例</label>
+                    <input
+                      className="input"
+                      type="number"
+                      min={0.01}
+                      step={0.01}
+                      value={mattingConfig.scaleRatioY}
+                      onChange={(e) => setScaleRatioY(e.target.value)}
+                      disabled={mattingConfig.scaleLockAspect}
+                    />
+                    <label>常用比例</label>
+                    <select
+                      className="input"
+                      value={scalePresetRatio}
+                      onChange={(e) => {
+                        const ratio = Number(e.target.value)
+                        if (!Number.isFinite(ratio)) return
+                        setScalePresetRatio(ratio)
+                        setScaleRatioX(String(ratio))
+                        setScaleRatioY(String(ratio))
+                      }}
+                      disabled={mattingProcessing}
+                    >
+                      {SCALE_PRESET_OPTIONS.map((ratio) => (
+                        <option key={ratio} value={ratio}>{Math.round(ratio * 100)}%</option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+              )}
+            />
+
+            <ProcessActionCard
+              title="裁剪"
+              density="compact"
+              actions={(
+                <>
+                  <button type="button" className="btn" onClick={applyCropToActive} disabled={!mattingAsset || mattingProcessing}>应用</button>
+                  <button type="button" className="btn ghost" onClick={applyCropToBatch} disabled={tabAssets.matting.length === 0 || mattingProcessing}>批量</button>
+                </>
+              )}
+              config={(
+                <div className="border-mode-config" style={{ width: 'fit-content', marginLeft: 'auto' }}>
+                  <div
+                    className="field-grid"
+                    style={{
+                      margin: 0,
+                      width: 'fit-content',
+                      gridTemplateColumns: 'auto 104px auto 104px auto 128px',
+                      alignItems: 'center',
+                    }}
+                  >
+                    <label>目标宽度</label>
+                    <input
+                      className="input"
+                      type="number"
+                      min={1}
+                      value={mattingConfig.cropWidth}
+                      onChange={(e) => setCropSize('cropWidth', e.target.value)}
+                    />
+                    <label>目标高度</label>
+                    <input
+                      className="input"
+                      type="number"
+                      min={1}
+                      value={mattingConfig.cropHeight}
+                      onChange={(e) => setCropSize('cropHeight', e.target.value)}
+                    />
+                    <label>常用尺寸</label>
+                    <select
+                      className="input"
+                      value={cropPresetSize}
+                      onChange={(e) => {
+                        const size = Number(e.target.value)
+                        if (!Number.isFinite(size)) return
+                        setCropPresetSize(size)
+                        setCropSize('cropWidth', String(size))
+                        setCropSize('cropHeight', String(size))
+                      }}
+                      disabled={mattingProcessing}
+                    >
+                      {CROP_PRESET_OPTIONS.map((size) => (
+                        <option key={size} value={size}>{size}</option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+              )}
+            />
+
             <div className="hint matting-status">{mattingStatus}</div>
           </div>
         </div>
@@ -1196,25 +2138,238 @@ export function ProcessPage() {
           <h3>帧动画时间线</h3>
           <div className="action-row">
             <button type="button" className="btn" onClick={() => setIsPlaying((prev) => !prev)} disabled={timelineAssets.length <= 1}>{isPlaying ? '暂停' : '播放'}</button>
+            <button
+              type="button"
+              className="btn ghost"
+              onClick={() => {
+                setPendingTimelineFrameIds([])
+                setShowTimelineAddFrameModal(true)
+              }}
+              disabled={tabAssets.timeline.length === 0}
+            >
+              添加帧
+            </button>
+            <button
+              type="button"
+              className="btn ghost"
+              onClick={clearAllTimelineFramesWithRelatedData}
+              disabled={timelineAssets.length === 0}
+            >
+              清除
+            </button>
             <label className="hint">FPS</label>
             <input className="input" type="number" min={1} max={60} value={timeline.fps} onChange={(e) => setTimelineFps(Number(e.target.value))} style={{ width: 100 }} />
             <button type="button" className={timeline.loop ? 'btn' : 'btn ghost'} onClick={toggleTimelineLoop}>循环：{timeline.loop ? '开' : '关'}</button>
             <span className="hint">总帧数：{timelineAssets.length}</span>
+            <button
+              type="button"
+              className="btn"
+              style={{ marginLeft: 'auto' }}
+              onClick={() => setShowTimelineComposeModal(true)}
+              disabled={timelineAssets.length === 0}
+            >
+              合成
+            </button>
           </div>
 
-          <div className="timeline-preview">
-            {currentFrame ? (
-              <>
-                <img className="matting-img" src={currentFrame.objectUrl} alt={currentFrame.name} />
-                <div className="hint">当前帧：{frameIndex + 1}/{timelineAssets.length} · {currentFrame.name}</div>
-              </>
-            ) : (
-              <div className="empty">请先导入素材作为帧序列。</div>
-            )}
+          <div className="timeline-workbench">
+            <div className="timeline-preview">
+              {currentTimelineFrame ? (
+                <>
+                  <div className="timeline-preview-stage" onClick={handleTimelineGuideAdd}>
+                    <button
+                      type="button"
+                      className="btn ghost timeline-preview-reset-btn"
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        resetCurrentTimelineFrameChanges()
+                      }}
+                      disabled={!currentTimelineFrameHasEdits}
+                    >
+                      重置
+                    </button>
+                    <img
+                      ref={timelinePreviewImageRef}
+                      className="matting-img timeline-preview-image"
+                      src={currentTimelineFrame.objectUrl}
+                      alt={currentTimelineFrame.name}
+                      onLoad={(event) => {
+                        setTimelinePreviewRenderSize({ width: event.currentTarget.clientWidth, height: event.currentTarget.clientHeight })
+                      }}
+                    />
+
+                    {currentTimelineGuides.linesX.map((x) => <div key={`tx-${x}`} className="slice-guide-line x" style={{ left: resolveTimelineOverlayX(x) }} />)}
+                    {currentTimelineGuides.linesY.map((y) => <div key={`ty-${y}`} className="slice-guide-line y" style={{ top: resolveTimelineOverlayY(y) }} />)}
+                    {currentTimelineGuides.points.map((point) => (
+                      <div
+                        key={point.id}
+                        className="manual-line"
+                        style={{
+                          left: resolveTimelineOverlayX(point.x),
+                          top: resolveTimelineOverlayY(point.y),
+                          width: 8,
+                          height: 8,
+                          marginLeft: -4,
+                          marginTop: -4,
+                          borderRadius: '50%',
+                          background: selectedTimelineGuide?.type === 'point' && selectedTimelineGuide.id === point.id ? 'rgba(255, 214, 10, 0.95)' : 'rgba(255, 214, 10, 0.65)',
+                        }}
+                      />
+                    ))}
+                  </div>
+                  <div className="hint">{frameIndex + 1}/{timelineDisplayAssets.length} · {currentTimelineFrame.name}</div>
+                </>
+              ) : (
+                <div className="empty">请先导入素材并点击“添加帧”。</div>
+              )}
+            </div>
+
+            <div className="timeline-tools-panel">
+              <div className="panel">
+                <h4>移动</h4>
+                <div className="action-row" style={{ margin: 0 }}>
+                  <button type="button" className="btn" onClick={() => void applyTimelineAutoMove()}>自动</button>
+                  <button type="button" className="btn ghost gear-btn" aria-label="自动移动设置" onClick={() => setShowTimelineAutoMoveModal(true)}>⚙</button>
+                  <button type="button" className="btn ghost" onClick={clearTimelineMoveResults}>重置</button>
+                </div>
+                <div className="action-row" style={{ margin: 0 }}>
+                  <label className="hint">步长</label>
+                  <input
+                    className="input"
+                    type="number"
+                    min={1}
+                    value={timelineMoveStep}
+                    onChange={(e) => setTimelineMoveStep(Math.max(1, Number(e.target.value) || 1))}
+                    style={{ width: 64 }}
+                  />
+                  <label className="hint">阈值</label>
+                  <input
+                    className="input"
+                    type="number"
+                    min={0}
+                    max={254}
+                    value={timelineMoveAlphaThreshold}
+                    onChange={(e) => setTimelineMoveAlphaThreshold(Math.max(0, Math.min(254, Number(e.target.value) || 0)))}
+                    style={{ width: 64 }}
+                  />
+                </div>
+                <div className="timeline-nudge-grid" style={{ marginTop: 6 }}>
+                  <button type="button" className="btn ghost" onClick={() => void nudgeCurrentTimelineFrame(0, -timelineMoveStep)}>↑</button>
+                  <button type="button" className="btn ghost" onClick={() => void nudgeCurrentTimelineFrame(-timelineMoveStep, 0)}>←</button>
+                  <button type="button" className="btn ghost" onClick={() => void nudgeCurrentTimelineFrame(timelineMoveStep, 0)}>→</button>
+                  <button type="button" className="btn ghost" onClick={() => void nudgeCurrentTimelineFrame(0, timelineMoveStep)}>↓</button>
+                </div>
+              </div>
+
+              <div className="panel">
+                <h4>基准</h4>
+                <div className="timeline-guide-row">
+                  <div className="timeline-guide-actions">
+                    <button type="button" className={timelineGuideDrawMode === 'x' ? 'btn' : 'btn ghost'} onClick={() => setTimelineGuideDrawMode((prev) => (prev === 'x' ? 'none' : 'x'))}>竖线</button>
+                    <button type="button" className={timelineGuideDrawMode === 'y' ? 'btn' : 'btn ghost'} onClick={() => setTimelineGuideDrawMode((prev) => (prev === 'y' ? 'none' : 'y'))}>横线</button>
+                    <button type="button" className={timelineGuideDrawMode === 'point' ? 'btn' : 'btn ghost'} onClick={() => setTimelineGuideDrawMode((prev) => (prev === 'point' ? 'none' : 'point'))}>点</button>
+                    <button
+                      type="button"
+                      className="btn ghost"
+                      onClick={() => {
+                        if (!currentTimelineFrame) return
+                        mutateFrameGuides(currentTimelineFrame.id, () => ({ linesX: [], linesY: [], points: [] }))
+                        setCurrentFrameSelectedGuide(null)
+                      }}
+                    >
+                      全清
+                    </button>
+                    <button type="button" className="btn" onClick={() => void alignTimelineToSelectedGuide()} disabled={!selectedTimelineGuide || timelineDisplayAssets.length === 0}>对齐基准</button>
+                    <button type="button" className="btn ghost" onClick={() => void centerSelectedTimelineGuideInCurrentFrame()} disabled={!selectedTimelineGuide || !currentTimelineFrame}>基准居中</button>
+                  </div>
+
+                  <div className="timeline-guide-list">
+                    {currentTimelineGuides.linesX.map((line) => (
+                      <div key={`gx-${line}`} className="timeline-guide-chip">
+                        <button
+                          type="button"
+                          className={selectedTimelineGuide?.type === 'x' && selectedTimelineGuide.value === line ? 'btn' : 'btn ghost'}
+                          style={{ padding: '2px 8px', fontSize: 12 }}
+                          onClick={() => {
+                            toggleCurrentFrameSelectedGuide({ type: 'x', value: line })
+                          }}
+                        >
+                          X:{line}
+                        </button>
+                        <button
+                          type="button"
+                          className="timeline-chip-close"
+                          onClick={() => {
+                            if (!currentTimelineFrame) return
+                            mutateFrameGuides(currentTimelineFrame.id, (prev) => ({ ...prev, linesX: prev.linesX.filter((x) => x !== line) }))
+                          }}
+                        >
+                          ×
+                        </button>
+                      </div>
+                    ))}
+                    {currentTimelineGuides.linesY.map((line) => (
+                      <div key={`gy-${line}`} className="timeline-guide-chip">
+                        <button
+                          type="button"
+                          className={selectedTimelineGuide?.type === 'y' && selectedTimelineGuide.value === line ? 'btn' : 'btn ghost'}
+                          style={{ padding: '2px 8px', fontSize: 12 }}
+                          onClick={() => {
+                            toggleCurrentFrameSelectedGuide({ type: 'y', value: line })
+                          }}
+                        >
+                          Y:{line}
+                        </button>
+                        <button
+                          type="button"
+                          className="timeline-chip-close"
+                          onClick={() => {
+                            if (!currentTimelineFrame) return
+                            mutateFrameGuides(currentTimelineFrame.id, (prev) => ({ ...prev, linesY: prev.linesY.filter((y) => y !== line) }))
+                          }}
+                        >
+                          ×
+                        </button>
+                      </div>
+                    ))}
+                    {currentTimelineGuides.points.map((point) => (
+                      <div key={point.id} className="timeline-guide-chip">
+                        <button
+                          type="button"
+                          className={selectedTimelineGuide?.type === 'point' && selectedTimelineGuide.id === point.id ? 'btn' : 'btn ghost'}
+                          style={{ padding: '2px 8px', fontSize: 12 }}
+                          onClick={() => {
+                            toggleCurrentFrameSelectedGuide({ type: 'point', id: point.id })
+                          }}
+                        >
+                          ({point.x},{point.y})
+                        </button>
+                        <button
+                          type="button"
+                          className="timeline-chip-close"
+                          onClick={() => {
+                            if (!currentTimelineFrame) return
+                            mutateFrameGuides(currentTimelineFrame.id, (prev) => ({ ...prev, points: prev.points.filter((item) => item.id !== point.id) }))
+                          }}
+                        >
+                          ×
+                        </button>
+                      </div>
+                    ))}
+                    {currentTimelineGuides.linesX.length === 0 && currentTimelineGuides.linesY.length === 0 && currentTimelineGuides.points.length === 0 && (
+                      <span className="hint">暂无基准</span>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
+
+          {timelineMoveStatus && <div className="hint">{timelineMoveStatus}</div>}
+          {timelineComposeStatus && <div className="hint">{timelineComposeStatus}</div>}
 
           <div className="timeline-list">
-            {timelineAssets.map((asset, idx) => (
+            {timelineDisplayAssets.map((asset, idx) => (
               <div
                 key={asset!.id}
                 className={idx === frameIndex ? 'timeline-item active' : 'timeline-item'}
@@ -1228,16 +2383,148 @@ export function ProcessPage() {
                 }}
                 onClick={() => setFrameIndex(idx)}
               >
+                <label className="hint" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }} onClick={(event) => event.stopPropagation()}>
+                  <input
+                    type="checkbox"
+                    checked={selectedTimelineFrameIds.includes(asset.id)}
+                    onChange={() => toggleTimelineFrameSelection(asset.id)}
+                  />
+                  选中
+                </label>
                 <img src={asset.objectUrl} alt={asset.name} />
                 <div>
                   <div className="asset-name">#{idx + 1} {asset.name}</div>
                   <small>{asset.width}×{asset.height}</small>
                 </div>
-                <button type="button" className="btn ghost" onClick={(event) => { event.stopPropagation(); removeTimelineFrame(asset.id) }}>
+                <button type="button" className="btn ghost" onClick={(event) => { event.stopPropagation(); removeTimelineFrameWithRelatedData(asset.id) }}>
                   删除
                 </button>
               </div>
             ))}
+          </div>
+        </div>
+      )}
+
+      {showTimelineAddFrameModal && (
+        <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="添加动画帧">
+          <div className="modal-card">
+            <h3>添加帧</h3>
+            <div className="hint">从当前导入素材中多选要加入动画序列的图片。</div>
+            <div className="action-row" style={{ marginTop: 8, marginBottom: 0 }}>
+              <button type="button" className="btn ghost" onClick={toggleSelectAllPendingTimelineFrames} disabled={timelineSourceOptions.length === 0}>
+                {timelineSourceOptions.length > 0 && timelineSourceOptions.every((asset) => pendingTimelineFrameIds.includes(asset.id)) ? '取消全选' : '全选'}
+              </button>
+            </div>
+
+            <div className="timeline-list" style={{ marginTop: 10, maxHeight: 360, overflow: 'auto' }}>
+              {timelineSourceOptions.map((asset) => (
+                <label key={asset.id} className="timeline-item" style={{ cursor: 'pointer' }}>
+                  <input
+                    type="checkbox"
+                    checked={pendingTimelineFrameIds.includes(asset.id)}
+                    onChange={() => togglePendingTimelineFrame(asset.id)}
+                  />
+                  <img src={asset.imageUrl} alt={asset.name} />
+                  <div>
+                    <div className="asset-name">{asset.name}</div>
+                    <small>{asset.width}×{asset.height}</small>
+                  </div>
+                </label>
+              ))}
+              {timelineSourceOptions.length === 0 && <div className="empty">没有可添加的素材（可能都已在帧列表中）。</div>}
+            </div>
+
+            <div className="action-row">
+              <button type="button" className="btn" onClick={confirmAddTimelineFrames} disabled={pendingTimelineFrameIds.length === 0}>确认添加</button>
+              <button type="button" className="btn ghost" onClick={() => setShowTimelineAddFrameModal(false)}>取消</button>
+              <span className="hint">已选 {pendingTimelineFrameIds.length} 张</span>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showTimelineComposeModal && (
+        <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="合成设置">
+          <div className="modal-card">
+            <h3>合成设置</h3>
+            <div className="field-grid two-col" style={{ marginTop: 8 }}>
+              <label>合成方式</label>
+              <select className="input" value={timelineComposeMode} onChange={(e) => setTimelineComposeMode(e.target.value as TimelineComposeMode)}>
+                <option value="spritesheet">精灵图</option>
+              </select>
+              <label>排布方式</label>
+              <select className="input" value={timelineComposeLayout} onChange={(e) => setTimelineComposeLayout(e.target.value as TimelineComposeLayout)}>
+                <option value="row_major">按行排列（先横后竖）</option>
+                <option value="column_major">按列排列（先竖后横）</option>
+              </select>
+              <label>排布行数</label>
+              <input
+                className="input"
+                type="number"
+                min={1}
+                value={timelineComposeRows}
+                onChange={(e) => setTimelineComposeRows(Math.max(1, Number(e.target.value) || 1))}
+              />
+              <label>排布列数</label>
+              <input
+                className="input"
+                type="number"
+                min={1}
+                value={timelineComposeCols}
+                onChange={(e) => setTimelineComposeCols(Math.max(1, Number(e.target.value) || 1))}
+              />
+            </div>
+            <div className="hint" style={{ marginTop: 8 }}>当前帧顺序即合成顺序，可在时间线列表中拖拽调整。</div>
+            <label className="hint" style={{ display: 'inline-flex', alignItems: 'center', gap: 6, marginTop: 8 }}>
+              <input
+                type="checkbox"
+                checked={timelinePreviewShowGridNumber}
+                onChange={(e) => setTimelinePreviewShowGridNumber(e.target.checked)}
+              />
+              预览显示格子编号
+            </label>
+
+            {timelineComposePreview && (
+              <div style={{ marginTop: 12 }}>
+                <img className="matting-img" src={timelineComposePreview.imageUrl} alt="合成预览" style={{ maxHeight: 260 }} />
+                <div className="hint" style={{ marginTop: 6 }}>{timelineComposePreview.meta}</div>
+              </div>
+            )}
+
+            <div className="action-row">
+              <button type="button" className="btn ghost" onClick={() => void previewTimelineCompose()}>预览</button>
+              <button type="button" className="btn" onClick={() => void composeTimelineSpritesheet()}>开始合成</button>
+              <button
+                type="button"
+                className="btn ghost"
+                onClick={() => {
+                  updateTimelineComposePreview(null)
+                  setShowTimelineComposeModal(false)
+                }}
+              >
+                取消
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showTimelineAutoMoveModal && (
+        <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="自动移动设置">
+          <div className="modal-card" style={{ maxWidth: 420 }}>
+            <h3>自动移动设置</h3>
+            <div className="field-grid" style={{ marginTop: 8 }}>
+              <label>模式</label>
+              <select className="input" value={timelineMoveAutoAlgorithm} onChange={(e) => setTimelineMoveAutoAlgorithm(e.target.value as 'canvas_center' | 'median_anchor' | 'reference_frame')}>
+                <option value="canvas_center">画布中心</option>
+                <option value="median_anchor">中位锚点</option>
+                <option value="reference_frame">参考帧</option>
+              </select>
+            </div>
+            <div className="action-row" style={{ marginTop: 12 }}>
+              <button type="button" className="btn" onClick={() => setShowTimelineAutoMoveModal(false)}>确定</button>
+              <button type="button" className="btn ghost" onClick={() => setShowTimelineAutoMoveModal(false)}>取消</button>
+            </div>
           </div>
         </div>
       )}

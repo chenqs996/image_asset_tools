@@ -80,6 +80,8 @@ export function toMattingResultAsset(asset: ImageAsset, result: MattingResult): 
     ...asset,
     name: resultName,
     format: 'png',
+    width: result.outputWidth,
+    height: result.outputHeight,
     objectUrl: result.outputUrl,
     size: 0,
     file: new File([], resultName),

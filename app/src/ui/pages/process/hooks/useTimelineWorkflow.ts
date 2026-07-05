@@ -24,9 +24,7 @@ export function useTimelineWorkflow({ timelineSourceAssets, fps, loop }: UseTime
 
   useEffect(() => {
     setTimelineFrameIds((prev) => {
-      const existing = prev.filter((id) => timelineSourceAssets.some((asset) => asset.id === id))
-      const append = timelineSourceAssets.map((asset) => asset.id).filter((id) => !existing.includes(id))
-      return [...existing, ...append]
+      return prev.filter((id) => timelineSourceAssets.some((asset) => asset.id === id))
     })
   }, [timelineSourceAssets])
 
@@ -62,6 +60,20 @@ export function useTimelineWorkflow({ timelineSourceAssets, fps, loop }: UseTime
     setTimelineFrameIds((prev) => prev.filter((id) => id !== assetId))
   }
 
+  const addTimelineFrames = (assetIds: string[]) => {
+    setTimelineFrameIds((prev) => {
+      const validIds = assetIds.filter((id) => timelineSourceAssets.some((asset) => asset.id === id))
+      const append = validIds.filter((id) => !prev.includes(id))
+      if (append.length === 0) return prev
+      return [...prev, ...append]
+    })
+  }
+
+  const clearTimelineFrames = (assetIds: string[]) => {
+    if (assetIds.length === 0) return
+    setTimelineFrameIds((prev) => prev.filter((id) => !assetIds.includes(id)))
+  }
+
   return {
     isPlaying,
     setIsPlaying,
@@ -70,8 +82,11 @@ export function useTimelineWorkflow({ timelineSourceAssets, fps, loop }: UseTime
     dragFromIndex,
     setDragFromIndex,
     timelineAssets,
+    timelineFrameIds,
     currentFrame,
     reorderTimelineFrame,
     removeTimelineFrame,
+    addTimelineFrames,
+    clearTimelineFrames,
   }
 }

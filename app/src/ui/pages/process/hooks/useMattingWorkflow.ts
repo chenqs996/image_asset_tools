@@ -1,5 +1,12 @@
 import { useEffect, useState } from 'react'
-import { detectMattingAnchor, runMattingBackground, runMattingBorder, runMattingMove } from '../../../../core/services/mattingService'
+import {
+  detectMattingAnchor,
+  runMattingBackground,
+  runMattingBorder,
+  runMattingCrop,
+  runMattingMove,
+  runMattingScale,
+} from '../../../../core/services/mattingService'
 import { providerRegistry } from '../../../../core/services/providerRegistry'
 import type { ImageAsset } from '../../../../types/image'
 import { DEFAULT_MATTING_CONFIG, type MattingConfig, type MattingResult } from '../../../../types/matting'
@@ -85,6 +92,8 @@ export function useMattingWorkflow({ mattingAssets, mattingAsset }: UseMattingWo
     return {
       ...asset,
       objectUrl: latestResult.outputUrl,
+      width: latestResult.outputWidth,
+      height: latestResult.outputHeight,
     }
   }
 
@@ -224,6 +233,66 @@ export function useMattingWorkflow({ mattingAssets, mattingAsset }: UseMattingWo
     }
   }
 
+  const applyScaleToActive = async () => {
+    if (!mattingAsset) return
+    setMattingProcessing(true)
+    setMattingStatus(`缩放处理中：${mattingAsset.name}`)
+    try {
+      const result = await runMattingScale(getMattingSourceAsset(mattingAsset), mattingConfig)
+      setMattingResult(result)
+      setMattingStatus(result.warning ?? '缩放完成')
+    } finally {
+      setMattingProcessing(false)
+    }
+  }
+
+  const applyScaleToBatch = async () => {
+    if (mattingAssets.length === 0) return
+    setMattingProcessing(true)
+    try {
+      let finished = 0
+      for (const asset of mattingAssets) {
+        setMattingStatus(`批量缩放 ${finished + 1}/${mattingAssets.length}：${asset.name}`)
+        const result = await runMattingScale(getMattingSourceAsset(asset), mattingConfig)
+        setMattingResult(result)
+        finished += 1
+      }
+      setMattingStatus('批量缩放完成')
+    } finally {
+      setMattingProcessing(false)
+    }
+  }
+
+  const applyCropToActive = async () => {
+    if (!mattingAsset) return
+    setMattingProcessing(true)
+    setMattingStatus(`裁剪处理中：${mattingAsset.name}`)
+    try {
+      const result = await runMattingCrop(getMattingSourceAsset(mattingAsset), mattingConfig)
+      setMattingResult(result)
+      setMattingStatus(result.warning ?? '裁剪完成')
+    } finally {
+      setMattingProcessing(false)
+    }
+  }
+
+  const applyCropToBatch = async () => {
+    if (mattingAssets.length === 0) return
+    setMattingProcessing(true)
+    try {
+      let finished = 0
+      for (const asset of mattingAssets) {
+        setMattingStatus(`批量裁剪 ${finished + 1}/${mattingAssets.length}：${asset.name}`)
+        const result = await runMattingCrop(getMattingSourceAsset(asset), mattingConfig)
+        setMattingResult(result)
+        finished += 1
+      }
+      setMattingStatus('批量裁剪完成')
+    } finally {
+      setMattingProcessing(false)
+    }
+  }
+
   const updateMattingNumber = (key: 'threshold' | 'smooth' | 'denoise' | 'feather', value: string) => {
     const parsed = Number(value)
     setMattingConfig((prev) => ({ ...prev, [key]: Number.isFinite(parsed) ? parsed : 0 }))
@@ -275,6 +344,44 @@ export function useMattingWorkflow({ mattingAssets, mattingAsset }: UseMattingWo
     }))
   }
 
+  const setScaleRatioX = (value: string) => {
+    const parsed = Number(value)
+    if (!Number.isFinite(parsed)) return
+    const safe = Math.max(0.01, parsed)
+    setMattingConfig((prev) => ({
+      ...prev,
+      scaleRatioX: safe,
+      scaleRatioY: prev.scaleLockAspect ? safe : prev.scaleRatioY,
+    }))
+  }
+
+  const setScaleRatioY = (value: string) => {
+    const parsed = Number(value)
+    if (!Number.isFinite(parsed)) return
+    const safe = Math.max(0.01, parsed)
+    setMattingConfig((prev) => ({
+      ...prev,
+      scaleRatioY: safe,
+    }))
+  }
+
+  const setScaleLockAspect = (locked: boolean) => {
+    setMattingConfig((prev) => ({
+      ...prev,
+      scaleLockAspect: locked,
+      scaleRatioY: locked ? prev.scaleRatioX : prev.scaleRatioY,
+    }))
+  }
+
+  const setCropSize = (key: 'cropWidth' | 'cropHeight', value: string) => {
+    const parsed = Number(value)
+    if (!Number.isFinite(parsed)) return
+    setMattingConfig((prev) => ({
+      ...prev,
+      [key]: Math.max(1, Math.floor(parsed)),
+    }))
+  }
+
   return {
     mattingConfig,
     setMattingConfig,
@@ -296,5 +403,13 @@ export function useMattingWorkflow({ mattingAssets, mattingAsset }: UseMattingWo
     applyBorderToBatch,
     applyMoveToActive,
     applyMoveToBatch,
+    applyScaleToActive,
+    applyScaleToBatch,
+    applyCropToActive,
+    applyCropToBatch,
+    setScaleRatioX,
+    setScaleRatioY,
+    setScaleLockAspect,
+    setCropSize,
   }
 }
